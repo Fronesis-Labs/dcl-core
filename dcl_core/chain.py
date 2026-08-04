@@ -12,6 +12,13 @@ Fix vs the version previously embedded in dcl-webhook's dcl_core.py:
     stored in the `timestamp` column (previously two separate time.time()
     calls were made, one for hashing and one for storage, making the hash
     permanently unreproducible from stored fields).
+
+Patch (this file): added export() — a plain metadata dump of the full
+chain, oldest first. This is read-only access to already-stored fields
+(the same shape get_by_tx() returns), not scoring/policy logic, so it
+belongs in the open protocol layer. webhook_server.py's GET /chain/export
+was calling _chain.export() against a ChainState that never defined it —
+this closes that gap.
 """
 
 import hashlib
@@ -154,6 +161,22 @@ class ChainState:
         if not row:
             return None
         return self._row_to_dict(row)
+
+    def export(self) -> list:
+        """Full chain dump, oldest first. Metadata only — never raw content.
+
+        Same field shape as get_by_tx(), for every row in the chain. Read-only
+        access to already-stored data; not scoring/policy logic, so it stays
+        in the open protocol layer alongside append()/get_by_tx()/verify().
+        """
+        rows = self._conn.execute(
+            """
+            SELECT idx, tx_hash, prev_hash, verdict, input_hash, policy_hash,
+                   agent_id, reason, confidence, task_type, timestamp, drift_context
+            FROM chain ORDER BY idx
+            """
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     @staticmethod
     def _row_to_dict(row) -> dict:

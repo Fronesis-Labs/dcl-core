@@ -2,6 +2,9 @@
 Regression tests for the two fixes:
   1. ChainState.verify() must detect content tampering, not just broken links.
   2. Super-Hash consensus must resist the XOR-forgeability attack.
+
+Plus a coverage test for export(), added when dcl-webhook's GET /chain/export
+turned out to be calling a method that never existed on ChainState.
 """
 
 import os
@@ -59,6 +62,27 @@ def test_detects_broken_link():
     clean, bad_idx, reason = chain.verify()
     assert clean is False
     assert bad_idx == 1
+
+
+def test_export_returns_full_chain_in_order():
+    chain, path = make_chain()
+    chain.append("COMMIT", "ih1", "ph1", "agent-1", "ok", 0.95, "test")
+    chain.append("NO_COMMIT", "ih2", "ph1", "agent-2", "policy violation", 0.10, "test")
+
+    dump = chain.export()
+    assert len(dump) == 2
+    assert [row["index"] for row in dump] == [0, 1]
+    assert dump[0]["agent_id"] == "agent-1"
+    assert dump[1]["verdict"] == "NO_COMMIT"
+
+
+def test_export_matches_get_by_tx_shape():
+    chain, path = make_chain()
+    tx_hash, _ = chain.append("COMMIT", "ih1", "ph1", "agent-1", "ok", 0.95, "test")
+
+    exported_row = chain.export()[0]
+    fetched_row = chain.get_by_tx(tx_hash)
+    assert exported_row == fetched_row
 
 
 def test_super_hash_order_independent():
