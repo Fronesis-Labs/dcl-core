@@ -24,6 +24,7 @@ this closes that gap.
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 from typing import Optional, Tuple
 
@@ -48,7 +49,8 @@ class ChainState:
     HASH_LEN = 64  # full sha256 hex length; do not truncate (previous version cut to 32)
 
     def __init__(self, db_path: str = "dcl_chain.db"):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.RLock()  # same-process thread safety
+        self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             """
@@ -119,35 +121,49 @@ class ChainState:
         task_type: str,
         drift_context: Optional[dict] = None,
     ) -> Tuple[str, int]:
-        last = self._conn.execute(
-            "SELECT tx_hash FROM chain ORDER BY idx DESC LIMIT 1"
-        ).fetchone()
-        prev_hash = last[0] if last else self.GENESIS
-        new_idx = self._conn.execute(
-            "SELECT COALESCE(MAX(idx), -1) + 1 FROM chain"
-        ).fetchone()[0]
+        # BEGIN IMMEDIATE grabs the SQLite write-lock before the SELECT, not
+        # after — this is what actually closes the race, not just the
+        # in-process RLock below. mcp_server.py and webhook_server.py are
+        # separate PM2 processes sharing this same db file; without this,
+        # two near-simultaneous appends (one MCP tool call, one REST call)
+        # can both read the same MAX(idx)/prev_hash and then collide on the
+        # INSERT (idx is a PRIMARY KEY), crashing the second caller's request
+        # instead of just making it wait its turn.
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                last = self._conn.execute(
+                    "SELECT tx_hash FROM chain ORDER BY idx DESC LIMIT 1"
+                ).fetchone()
+                prev_hash = last[0] if last else self.GENESIS
+                new_idx = self._conn.execute(
+                    "SELECT COALESCE(MAX(idx), -1) + 1 FROM chain"
+                ).fetchone()[0]
 
-        timestamp = time.time()
-        drift_context = drift_context or {}
-        drift_context_json = json.dumps(drift_context, sort_keys=True)
+                timestamp = time.time()
+                drift_context = drift_context or {}
+                drift_context_json = json.dumps(drift_context, sort_keys=True)
 
-        content = self._content_for_hash(
-            new_idx, verdict, input_hash, policy_hash, prev_hash,
-            agent_id, reason, confidence, task_type, timestamp, drift_context_json,
-        )
-        tx_hash = "0x" + sha256hex(content)  # full 64 hex chars, not truncated
+                content = self._content_for_hash(
+                    new_idx, verdict, input_hash, policy_hash, prev_hash,
+                    agent_id, reason, confidence, task_type, timestamp, drift_context_json,
+                )
+                tx_hash = "0x" + sha256hex(content)  # full 64 hex chars, not truncated
 
-        self._conn.execute(
-            """
-            INSERT INTO chain (idx, tx_hash, prev_hash, verdict, input_hash, policy_hash,
-                                agent_id, reason, confidence, task_type, timestamp, drift_context)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (new_idx, tx_hash, prev_hash, verdict, input_hash, policy_hash,
-             agent_id, reason, confidence, task_type, timestamp, drift_context_json),
-        )
-        self._conn.commit()
-        return tx_hash, new_idx
+                self._conn.execute(
+                    """
+                    INSERT INTO chain (idx, tx_hash, prev_hash, verdict, input_hash, policy_hash,
+                                        agent_id, reason, confidence, task_type, timestamp, drift_context)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (new_idx, tx_hash, prev_hash, verdict, input_hash, policy_hash,
+                     agent_id, reason, confidence, task_type, timestamp, drift_context_json),
+                )
+                self._conn.commit()
+                return tx_hash, new_idx
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def get_by_tx(self, tx_hash: str) -> Optional[dict]:
         row = self._conn.execute(
