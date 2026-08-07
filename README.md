@@ -1,8 +1,18 @@
 # DCL Core
 
+[![PyPI version](https://img.shields.io/pypi/v/dcl-core)](https://pypi.org/project/dcl-core/)
+[![Python versions](https://img.shields.io/pypi/pyversions/dcl-core)](https://pypi.org/project/dcl-core/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/Fronesis-Labs/dcl-core/blob/main/LICENSE)
+
 Tamper-evident record chain + multi-party consensus primitives for AI agent
 audit systems. Part of the Deterministic Commitment Layer / Leibniz Layer™
 ecosystem by Fronesis Labs.
+
+## Why a free package for a paid protocol
+
+DCL's paid layer is the *evaluation* — running an agent's output through a policy and getting a verdict, via [x402](https://github.com/coinbase/x402) micropayments in USDC on Base. Verification of a chain you already have is a different problem, and gating it behind a paywall would defeat the point of an audit trail. If you can't independently check that a record wasn't edited without paying the party who might have edited it, it isn't really independent verification.
+
+So: the protocol is open. `dcl-core` is the reference implementation for Python; [`@fronesis-labs/dcl-sdk`](https://github.com/Fronesis-Labs/dcl-sdk) is the equivalent for TypeScript/JavaScript, byte-for-byte compatible.
 
 This is a clean-history consolidation: the single-agent chain logic
 previously duplicated inside `dcl-webhook`, and the multi-agent consensus
@@ -41,8 +51,11 @@ last-mover advantage) and the XOR-forgery trick no longer works. See
 
 ```
 dcl_core/
+├── __init__.py
 ├── chain.py       ChainState — append-only chain, content-hash verify()
-└── consensus.py   ConsensusRound, compute_super_hash — multi-party consensus
+├── consensus.py   ConsensusRound, compute_super_hash — multi-party consensus
+├── seal.py        format_seal() — human-readable "Verified by..." seal, mirrors dcl-sdk's seal.ts
+└── verify.py      verify_chain() — standalone offline chain verification, mirrors dcl-sdk's verify.ts
 tests/
 └── test_fixes.py  Regression tests for both fixes above
 ```
