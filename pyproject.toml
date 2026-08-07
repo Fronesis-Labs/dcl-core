@@ -4,12 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dcl-core"
-version = "0.1.0"
-description = "Tamper-evident record chain and multi-party consensus primitives for AI agent audit systems."
+version = "0.3.0"
+description = "Tamper-evident record chain, offline chain verification, and multi-party consensus primitives for AI agent audit systems (DCL / Leibniz Layer protocol)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
 dependencies = []
+authors = [{ name = "Fronesis Labs" }]
+keywords = ["mcp", "model-context-protocol", "audit", "hash-chain", "ai-agents", "x402"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://mcp.fronesislabs.com"
+Repository = "https://github.com/Fronesis-Labs/dcl-core"
+Protocol = "https://github.com/Fronesis-Labs/dcl-sdk/blob/main/PROTOCOL.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
