@@ -51,8 +51,11 @@ last-mover advantage) and the XOR-forgery trick no longer works. See
 
 ```
 dcl_core/
+├── __init__.py
 ├── chain.py       ChainState — append-only chain, content-hash verify()
-└── consensus.py   ConsensusRound, compute_super_hash — multi-party consensus
+├── consensus.py   ConsensusRound, compute_super_hash — multi-party consensus
+├── seal.py        format_seal() — human-readable "Verified by..." seal, mirrors dcl-sdk's seal.ts
+└── verify.py      verify_chain() — standalone offline chain verification, mirrors dcl-sdk's verify.ts
 tests/
 └── test_fixes.py  Regression tests for both fixes above
 ```
