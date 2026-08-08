@@ -1,0 +1,49 @@
+name: Bug Report
+description: Verification logic disagrees with expectations, or the two reference implementations disagree with each other
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This library *is* the verification step — so the most useful bug
+        report is usually "dcl-core and dcl-sdk disagree on this record" or
+        "verifyChain/verify_chain returned the wrong answer for this input."
+        If you have both implementations handy, running the same record
+        through both is the fastest way to tell a real bug from an
+        environment issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: record
+    attributes:
+      label: Minimal record / chain that reproduces it
+      description: Redact anything sensitive — only the fields needed to reproduce matter.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: cross-check
+    attributes:
+      label: Did you check this against the other language's implementation?
+      description: dcl-core (Python) and dcl-sdk (TS/JS) are meant to be byte-for-byte compatible — if they disagree, that's a canonicalization bug worth flagging explicitly.
+      options:
+        - "Yes — they agree (bug is isolated to this implementation)"
+        - "Yes — they disagree"
+        - "No / not applicable"
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Package + version
+      placeholder: "dcl-sdk 0.1.1 / dcl-core 0.3.0"
+    validations:
+      required: false
