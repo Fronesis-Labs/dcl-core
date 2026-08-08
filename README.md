@@ -4,43 +4,63 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/dcl-core)](https://pypi.org/project/dcl-core/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/Fronesis-Labs/dcl-core/blob/main/LICENSE)
 
-Tamper-evident record chain + multi-party consensus primitives for AI agent
-audit systems. Part of the Deterministic Commitment Layer / Leibniz Layer™
-ecosystem by Fronesis Labs.
+**Don't trust the agent. Trust the proof.**
 
-## Why a free package for a paid protocol
+Python reference implementation of the tamper-evident record chain and
+multi-party consensus primitives behind DCL — the audit layer for
+autonomous AI agent decisions. Given a chain record, `dcl-core` recomputes
+its hash locally and tells you if it was tampered with. No API key, no
+network call, no trust placed in whoever is showing you the record.
 
-DCL's paid layer is the *evaluation* — running an agent's output through a policy and getting a verdict, via [x402](https://github.com/coinbase/x402) micropayments in USDC on Base. Verification of a chain you already have is a different problem, and gating it behind a paywall would defeat the point of an audit trail. If you can't independently check that a record wasn't edited without paying the party who might have edited it, it isn't really independent verification.
+Part of the Deterministic Commitment Layer / Leibniz Layer™ ecosystem by
+Fronesis Labs.
 
-So: the protocol is open. `dcl-core` is the reference implementation for Python; [`@fronesis-labs/dcl-sdk`](https://github.com/Fronesis-Labs/dcl-sdk) is the equivalent for TypeScript/JavaScript, byte-for-byte compatible.
+## Why This Package Is Free
+
+Verifying that an audit record hasn't been altered is a different problem
+from generating the verdict in the first place — and it's the one part of
+an audit system that *must* be independently checkable, or the audit trail
+isn't really independent. If you can only verify a record by paying the
+same party who might have edited it, that's not verification, it's trust
+with extra steps.
+
+So the protocol itself is open, Apache-2.0, and has no server dependency
+for its core function. `dcl-core` is the reference implementation for
+Python; [`@fronesis-labs/dcl-sdk`](https://github.com/Fronesis-Labs/dcl-sdk)
+is the byte-for-byte-compatible equivalent for TypeScript/JavaScript. DCL's
+paid layer — running an agent's output through policy and getting a
+verdict — lives separately in
+[`dcl-webhook`](https://github.com/Fronesis-Labs/dcl-webhook).
 
 This is a clean-history consolidation: the single-agent chain logic
 previously duplicated inside `dcl-webhook`, and the multi-agent consensus
 logic from `dcl-v2`, unified into one module with two known issues fixed.
 
-## What changed vs the previous implementations
+## Two Integrity Fixes Worth Knowing About
 
-### 1. `ChainState.verify()` now detects content tampering
+### 1. `ChainState.verify()` now catches content tampering, not just broken links
 
 The chain logic previously embedded in `dcl-webhook/dcl_core.py` only
 checked that `prev_hash` pointers linked correctly between rows. It never
 recomputed a row's hash from its own stored fields. That meant a party with
 direct database access could edit `verdict`, `confidence`, or `reason` on
 an existing row — without touching `tx_hash`/`prev_hash` — and `verify()`
-would still report the chain as clean. This defeated the core tamper-evident
+would still report the chain as clean. That defeated the core tamper-evident
 claim.
 
 `verify()` here recomputes each row's hash from all of its stored fields
 and compares it against the stored `tx_hash`. Editing any field now breaks
-verification. See `tests/test_fixes.py::test_detects_content_tamper_not_just_link_break`.
+verification. See
+`tests/test_fixes.py::test_detects_content_tamper_not_just_link_break`.
 
-### 2. Super-Hash consensus no longer uses XOR
+### 2. Multi-party consensus no longer forgeable via XOR
 
 `dcl-v2`'s original formula was `H*_t = hash(h_t1 ⊕ h_t2 ⊕ ... ⊕ h_tM)`.
-XOR is commutative and reversible: a party submitting last (or able to
-observe the running combination) can solve for a contribution that forces
-the final Super-Hash to any target value, without breaking any hash
-function — cheap arithmetic forgery, not a cryptographic break.
+XOR is commutative and reversible: a party submitting last — or able to
+observe the running combination — could solve for a contribution that
+forces the final Super-Hash to any target value, without breaking any hash
+function. Cheap arithmetic forgery, not a cryptographic break, but a real
+one.
 
 `compute_super_hash()` instead sorts contributions by party ID and hashes
 their length-prefixed concatenation. Order no longer matters (no
@@ -60,7 +80,7 @@ tests/
 └── test_fixes.py  Regression tests for both fixes above
 ```
 
-## Quick start
+## Quick Start
 
 ```bash
 pip install -e .
