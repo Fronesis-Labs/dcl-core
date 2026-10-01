@@ -1,0 +1,3 @@
+# Payment client for examples/production_web2_proof.py.
+# DCLGuard does not depend on this. Install it only to run the live proof.
+x402[requests,evm]>=2.25.0

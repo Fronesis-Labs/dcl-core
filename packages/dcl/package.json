@@ -1,0 +1,13 @@
+{
+  "name": "@fronesis/dcl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fail-closed Web2 gate that asks an existing DCL Trust Oracle before an HTTP side effect.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/guard.test.ts"
+  }
+}
