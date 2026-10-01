@@ -118,6 +118,31 @@ verification, and consensus combination. Scoring/policy engines (behavioral
 fingerprinting, epistemic validation thresholds, reputation weighting) stay
 in separate, closed modules that build on top of this.
 
+## Web2 HTTP side effect
+
+Web2 agents that need a COMMIT / NO_COMMIT gate in front of an HTTP side effect: [Protect an HTTP side effect with DCL](docs/PROTECT_HTTP_SIDE_EFFECT.md).
+
+```python
+from dcl import DCLGuard
+
+guard = DCLGuard(oracle_url="https://webhook.fronesislabs.com")
+decision = guard.check(
+    action="send_email",
+    target="api.example.com",
+    payload={"to": "user@example.com", "subject": "Hello"},
+)
+if decision.allowed:
+    # COMMIT: the HTTP side effect may run.
+    ...
+# NO_COMMIT: do not send the HTTP request.
+
+result = guard.post("https://api.example.com/send", json={"to": "user@example.com"})
+# COMMIT → result.executed is true and one HTTP request was sent.
+# NO_COMMIT → result.executed is false and no HTTP request was sent.
+```
+
+A live attempt against the documented Oracle and `https://httpbin.org/post` is [examples/production_web2_proof.py](examples/production_web2_proof.py). It uses `guard.post` only. The Oracle call can settle x402 through an adapter outside the guard. The httpbin POST stays unpaid and runs only after `COMMIT`. See [examples/README.md](examples/README.md).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).

@@ -28,6 +28,8 @@ Protocol = "https://github.com/Fronesis-Labs/dcl-sdk/blob/main/PROTOCOL.md"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Used only by examples/production_web2_proof.py. DCLGuard itself stays free of it.
+proof = ["x402[requests,evm]>=2.25.0"]
 
 [tool.setuptools.packages.find]
-include = ["dcl_core*"]
+include = ["dcl_core*", "dcl"]
