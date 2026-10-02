@@ -376,6 +376,7 @@ class GuardTests(unittest.TestCase):
                     self.assertEqual(result.decision.verdict, "COMMIT" if allowed else "NO_COMMIT")
                     self.assertEqual(result.decision.allowed, result.decision.verdict == "COMMIT")
                     self.assertEqual(result.executed, allowed)
+                    self.assertEqual(result.request_sent, allowed)
                     self.assertEqual(len(oracle.hits), 1)
                     self.assertEqual(len(self.effect.hits), 1 if allowed else 0)
                 finally:
@@ -402,6 +403,7 @@ class GuardTests(unittest.TestCase):
                     self.assertEqual(len(oracle.hits), 1)
                     self.assertEqual(len(self.effect.hits), target_hits)
                     self.assertEqual(result.executed, executed)
+                    self.assertEqual(result.request_sent, executed)
                     self.assertEqual(result.decision.allowed, executed)
                     self.assertEqual(result.decision.allowed, result.decision.verdict == "COMMIT")
                     if executed:
@@ -778,6 +780,7 @@ class TargetRedirectTests(unittest.TestCase):
             self.assertEqual(origin_hits, [json.dumps({"n": 1}, ensure_ascii=False).encode()])
             self.assertEqual(sink_hits, [])
             self.assertFalse(result.executed)
+            self.assertTrue(result.request_sent)
             self.assertEqual(result.decision.verdict, "NO_COMMIT")
             self.assertEqual(result.decision.reason, "target redirect refused")
             self.assertFalse(result.decision.allowed)

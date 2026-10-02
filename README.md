@@ -11,6 +11,8 @@ multi-party consensus primitives behind DCL — the audit layer for
 autonomous AI agent decisions. Given a chain record, `dcl-core` recomputes
 its hash locally and tells you if it was tampered with. No API key, no
 network call, no trust placed in whoever is showing you the record.
+That claim is `verify_chain()` on a full chain record. The Web2 proof
+later in this document only confirms the sequence this client observed.
 
 Part of the Deterministic Commitment Layer / Leibniz Layer™ ecosystem by
 Fronesis Labs.
@@ -134,6 +136,8 @@ result = guard.post(
 
 # result.executed is True only for exact COMMIT, a matching digest,
 # and a non-redirect response from that URL.
+# A target redirect sets request_sent True and executed False:
+# the digested host may already have seen the POST.
 ```
 
 `from dcl import DCLGuard` is the public guard import. `from dcl_core import ChainState` is the chain import. This distribution publishes both packages (`pyproject.toml` includes `dcl` and `dcl_core*`). They are not the same module.
@@ -153,6 +157,8 @@ canonical JSON body
 `METHOD` is stripped and uppercased. The digest includes the HTTP method, the canonical URL, and the canonical JSON body.
 
 The digest does not include HTTP headers, `Authorization`, `Content-Type`, x402 headers, cookies, `User-Agent`, other transport metadata, TLS metadata, or the network connection. `post()` can still send `headers=` to the target after COMMIT. Those headers are not sent to the Oracle and are not in the digest.
+
+The Oracle receives the action, the target, and the JSON body in the `response` field, not only the digest, because checks such as jailbreak evaluate that text. On the production Oracle that text is sent to `https://webhook.fronesislabs.com`, which is the same disclosure as publishing the decision on the public audit board.
 
 If a header changes what the request means, the Oracle decision is not cryptographically bound to that header.
 
@@ -216,7 +222,9 @@ These outcomes are fail-closed in `tests/test_dcl_guard.py` and `packages/dcl/te
 
 The default Oracle client (`_urllib_transport`, and `redirect: "manual"` in TypeScript) does not follow a 3xx from the Oracle. The guard then denies the side effect. A custom `transport` is responsible for its own Oracle requests; the guard still will not call the target unless that transport returns exact `COMMIT` plus the matching digest.
 
-The target POST also does not follow redirects. `urllib` redirect codes are turned into `TargetRedirectRefused` (TypeScript uses `redirect: "manual"`). `executed` is false and `Location` is not requested. The POST to the digested URL has already been sent, so that host may have seen the request. The redirect destination is not contacted.
+The target POST also does not follow redirects. `urllib` redirect codes are turned into `TargetRedirectRefused` (TypeScript uses `redirect: "manual"`). `Location` is not requested.
+
+Known case: `request_sent` is true and `executed` is false (`requestSent` in TypeScript). The POST to the digested URL has already been sent, so that host may have seen the request. `executed: false` does not mean the request never left this process. The redirect destination is not contacted.
 
 ### Production proof
 
@@ -237,6 +245,8 @@ Evidence:
 
 `payment.tx_hash` on the positive proof is the x402 settlement transaction: `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`.
 
+These two JSON files, from commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e` at `2026-10-02T06:45:16Z` and `2026-10-02T06:46:17Z`, are the current evidence. This repository does not contain an earlier proof note. A write-up that cites commit `8b620d0` or different hashes is a previous run, not a second canonical proof. The identifier that note called an Oracle transaction reference is the audit-chain hash (`oracle.tx_hash`), not a Base transaction.
+
 ### Evidence limitations
 
 The production proof shows what this client observed: the 402, one Oracle payment, the Oracle JSON, the digest comparison, the COMMIT or NO_COMMIT branch, and whether `DCLGuard.post()` then called the target.
@@ -249,7 +259,7 @@ It also does not provide network-level enforcement or stop another code path fro
 
 ### Payment
 
-x402 payment is not part of `DCLGuard`. The proof script passes `examples/oracle_x402_transport.py` as the Oracle `transport`. That adapter reads the first non-empty value among `DCL_PAYER_PRIVATE_KEY`, `X402_PRIVATE_KEY`, and `PRIVATE_KEY`, and it will not pay more than `DCL_MAX_PAYMENT_USDC` (default `0.01`). The guard never sees the key and never signs a payment. The target POST stays unpaid.
+x402 payment is not part of `DCLGuard`. The proof script passes `examples/oracle_x402_transport.py` as the Oracle `transport`. That adapter reads `DCL_PAYER_PRIVATE_KEY`, or `X402_PRIVATE_KEY` as its only alias. A general `PRIVATE_KEY` is ignored, even when it is set for another wallet. If neither accepted variable is set, the adapter raises before any network call or signature and names the missing variable. It will not pay more than `DCL_MAX_PAYMENT_USDC` (default `0.01`). The guard never sees the key and never signs a payment. The target POST stays unpaid.
 
 Do not commit a private key or a seed phrase. Use a dedicated wallet for automated x402 payments, keep only a small operational balance, and do not point this adapter at a treasury or personal wallet. Rotate a credential that has been exposed.
 

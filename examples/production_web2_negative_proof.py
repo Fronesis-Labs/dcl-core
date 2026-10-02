@@ -32,6 +32,7 @@ from dcl.guard import OracleHttpResponse
 from oracle_x402_transport import (
     InvalidPaymentCap,
     OracleTransportObservation,
+    MISSING_PAYER_KEY_MESSAGE,
     build_oracle_only_transport,
     payment_credentials_configured,
 )
@@ -46,7 +47,7 @@ PAYLOAD = {
 _SYNTHETIC_REASONS = frozenset(
     {
         "payment required and could not be completed",
-        "payment credentials not configured",
+        MISSING_PAYER_KEY_MESSAGE,
         "request digest missing",
         "request digest mismatch",
         "oracle timeout",

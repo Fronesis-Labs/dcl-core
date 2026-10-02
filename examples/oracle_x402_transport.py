@@ -17,11 +17,17 @@ from dcl.guard import OracleHttpResponse
 # Matches the live Oracle 402: maxAmountRequired "10000" is 0.01 USDC (6 decimals).
 DEFAULT_MAX_PAYMENT_USDC = "0.01"
 
-# Existing payer-key names. The first non-empty value wins. Values are never logged.
+# The payer key is DCL_PAYER_PRIVATE_KEY. X402_PRIVATE_KEY is the only alias.
+# PRIVATE_KEY is a common name for a different wallet and is never read.
 _PAYER_KEY_ENV_VARS = (
     "DCL_PAYER_PRIVATE_KEY",
     "X402_PRIVATE_KEY",
-    "PRIVATE_KEY",
+)
+
+MISSING_PAYER_KEY_MESSAGE = (
+    "DCL_PAYER_PRIVATE_KEY is not set. "
+    "The only accepted alias is X402_PRIVATE_KEY. "
+    "PRIVATE_KEY is ignored."
 )
 
 _CAP_ENV_VAR = "DCL_MAX_PAYMENT_USDC"
@@ -94,7 +100,7 @@ def build_oracle_only_transport(
     """Build a transport that can pay only ``evaluate_url``."""
     key = _payer_key(environ)
     if key is None:
-        raise OracleUrlRefused("payment credentials not configured")
+        raise OracleUrlRefused(MISSING_PAYER_KEY_MESSAGE)
     observed = observation if observation is not None else OracleTransportObservation()
     return OracleOnlyX402Transport(
         evaluate_url,

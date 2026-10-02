@@ -50,14 +50,19 @@ class Decision:
 class SideEffectResult:
     """Outcome of a guarded HTTP POST.
 
-    ``executed`` is true only after a COMMIT verdict and the side-effect
-    request was sent. A denial leaves the target untouched.
+    ``request_sent`` is true when the POST to the digested URL was sent,
+    including when that response was a redirect the guard refused to follow.
+    ``executed`` is true only when that POST returned a non-redirect response
+    after exact ``COMMIT`` and a matching digest. A denial before the target
+    call leaves both false. ``executed`` false with ``request_sent`` true
+    means the digested host may already have seen the request.
     """
 
     decision: Decision
     executed: bool
     status_code: int | None = None
     text: str | None = None
+    request_sent: bool = False
 
 
 @dataclass(frozen=True)
@@ -411,8 +416,9 @@ class DCLGuard:
 
         The target is opened only when the verdict is exactly ``COMMIT`` and
         the returned digest is identical. A redirect from that URL is not
-        followed: ``Location`` is not requested, and the result is fail-closed.
-        The digested host may already have received the first POST.
+        followed: ``Location`` is not requested, and ``executed`` is false.
+        ``request_sent`` is still true, because the digested host may already
+        have received that first POST.
         """
         try:
             expected = request_digest("POST", url, json)
@@ -465,10 +471,12 @@ class DCLGuard:
                     request_digest=decision.request_digest,
                 ),
                 executed=False,
+                request_sent=True,
             )
         return SideEffectResult(
             decision=decision,
             executed=True,
             status_code=status_code,
             text=text,
+            request_sent=True,
         )
