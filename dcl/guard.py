@@ -16,6 +16,12 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from dcl.signed_envelope import (
+    OracleTrustConfig,
+    decision_from_signed_wrapper,
+    looks_like_signed_wrapper,
+)
+
 _TIERS = frozenset({"fast", "strict", "jailbreak", "safety", "quality"})
 _ORACLE_USER_AGENT = "dcl-guard"
 
@@ -208,6 +214,7 @@ def _decision_from_http(
     body: bytes | str,
     *,
     expected_digest: str | None,
+    trust: OracleTrustConfig | None = None,
 ) -> Decision:
     # A payment challenge must never be parsed as an allow, even if the
     # body contains a COMMIT verdict.
@@ -230,6 +237,20 @@ def _decision_from_http(
         return _deny("malformed oracle response")
     if not isinstance(data, dict):
         return _deny("malformed oracle response")
+
+    if looks_like_signed_wrapper(data):
+        signed = decision_from_signed_wrapper(
+            data,
+            expected_digest=expected_digest,
+            trust=trust,
+        )
+        return Decision(
+            signed.allowed,
+            signed.verdict,
+            signed.reason,
+            trace_id=signed.trace_id,
+            request_digest=signed.request_digest,
+        )
 
     verdict = data.get("verdict")
     reason = data.get("reason")
@@ -319,6 +340,11 @@ class DCLGuard:
         with the Oracle evaluate URL and never uses it to call the
         side-effect target. Returning HTTP 402, or raising, denies the
         action. This guard does not sign payments or follow Oracle redirects.
+    trust:
+        Optional public-key mapping for a signed decision envelope. ``None``
+        keeps the unsigned Oracle JSON path. A signed wrapper is never
+        treated as trusted unless this mapping is supplied. Nonces are not
+        stored.
     """
 
     def __init__(
@@ -329,15 +355,19 @@ class DCLGuard:
         tier: str = "fast",
         agent_id: str = "dcl-guard",
         transport: Transport | None = None,
+        trust: OracleTrustConfig | None = None,
     ) -> None:
         if not isinstance(oracle_url, str) or not oracle_url.strip():
             raise ValueError("oracle_url is required")
         if tier not in _TIERS:
             raise ValueError(f"unknown evaluation tier: {tier}")
+        if trust is not None and not isinstance(trust, OracleTrustConfig):
+            raise TypeError("trust must be OracleTrustConfig or None")
         self.oracle_url = oracle_url.strip().rstrip("/")
         self.timeout = float(timeout)
         self.tier = tier
         self.agent_id = agent_id
+        self.trust = trust
         self._transport = transport or _urllib_transport
 
     def check(
@@ -392,7 +422,7 @@ class DCLGuard:
             return _deny("malformed oracle response")
         if not isinstance(body, (bytes, str)):
             return _deny("malformed oracle response")
-        return _decision_from_http(status, body, expected_digest=digest)
+        return _decision_from_http(status, body, expected_digest=digest, trust=self.trust)
 
     def post(
         self,

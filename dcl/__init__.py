@@ -5,13 +5,14 @@ when the verdict is COMMIT. Timeouts, malformed replies, server errors, and
 unpaid checks fail closed.
 """
 
-from dcl.guard import DCLGuard, Decision, SideEffectResult, request_digest
+from dcl.guard import DCLGuard, Decision, OracleTrustConfig, SideEffectResult, request_digest
 from dcl.sandbox import LocalSandbox
 
 __all__ = [
     "DCLGuard",
     "Decision",
     "LocalSandbox",
+    "OracleTrustConfig",
     "SideEffectResult",
     "request_digest",
 ]

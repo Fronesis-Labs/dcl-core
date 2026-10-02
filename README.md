@@ -184,16 +184,16 @@ This is library-level enforcement inside the process that calls `DCLGuard.post()
 Three different things:
 
 1. Request-digest binding: the guard compares the digest it computed with the `request_digest` string in the Oracle JSON.
-2. Oracle transport: the default client uses HTTPS/TLS to the configured Oracle URL and does not follow Oracle redirects. The guard does not verify an Oracle response signature.
+2. Oracle transport and trust: the default client uses HTTPS/TLS to the configured Oracle URL and does not follow Oracle redirects. Unsigned JSON remains supported. When OracleTrustConfig is configured, the guard verifies the Oracle signed wrapper before accepting the response.
 3. Audit-chain verification: `dcl_core.verify_chain()` recomputes a chain record hash. The guard does not do that.
 
-Oracle responses are not cryptographically signed. `DCLGuard` trusts the HTTPS/TLS connection to the configured Oracle endpoint. The current guard protocol does not provide independent response signature verification. There is no nonce, expiry, or replay counter in the guard response protocol. Signature and replay protection would be a protocol change; this release does not add them.
+Python `DCLGuard` with `trust=OracleTrustConfig(...)` verifies a signed wrapper. Without `trust`, it uses the current unsigned path. The TypeScript guard is still unsigned. Nonce replay protection is not implemented. HTTPS/TLS to the configured Oracle endpoint is still required. This does not mean every Oracle response is cryptographically signed.
 
-### Signed decision envelope (not implemented)
+### Signed decision envelope
 
-[Signed Oracle decision envelope v1](docs/SIGNED_ORACLE_DECISION_ENVELOPE_V1.md) is the contract for a later change. This release does not verify it, and `DCLGuard` still accepts the current unsigned Oracle JSON.
+[Signed Oracle decision envelope v1](docs/SIGNED_ORACLE_DECISION_ENVELOPE_V1.md) is the contract. Python `DCLGuard` verifies it only when the caller passes `trust=OracleTrustConfig(...)`. `trust=None`, the default, keeps the current unsigned Oracle JSON. Passing `trust` does not reject that unsigned JSON. A signed wrapper without `trust` stays a denial. The TypeScript guard does not verify envelopes yet.
 
-The signed message will be the UTF-8 canonical bytes of a fixed ten-field envelope, not the HTTP headers and not `oracle.tx_hash`. Ed25519 checks that those bytes were signed by the key named in `key_id`. A future guard accepts `COMMIT` only after that signature verifies and the envelope matches the local `request_digest`, `trace_id`, `issued_at`, `expires_at`, and `nonce` rules. The signature does not replace HTTPS/TLS. Remembering nonces so a signed envelope cannot be replayed is a separate guard enforcement step; this release does not add that store. The request-digest algorithm, Audit Event v1.0, and the production proof JSON stay as they are. `oracle.tx_hash` remains the audit-chain hash, not a Base transaction.
+The signed message is the UTF-8 canonical bytes of the ten-field envelope, not the HTTP headers and not `oracle.tx_hash`. The public key comes from `trust.keys`, not from the Oracle body. Unknown `key_id` is a denial. `COMMIT` after a signed wrapper requires a valid Ed25519 signature plus the envelope's `request_digest`, `trace_id`, `issued_at`, and `expires_at` checks. Nonce format is checked and is not stored; that is not replay protection. The signature does not replace HTTPS/TLS. The request-digest algorithm, Audit Event v1.0, and the production proof JSON stay as they are. `oracle.tx_hash` remains the audit-chain hash, not a Base transaction.
 
 `verdict` must be exactly `COMMIT` or exactly `NO_COMMIT`. `COMMITTED`, `commit`, `COMMIT `, and any other string are denials. `allowed` is true only when `verdict == "COMMIT"`.
 
