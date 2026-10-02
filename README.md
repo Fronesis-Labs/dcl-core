@@ -120,28 +120,54 @@ in separate, closed modules that build on top of this.
 
 ## Web2 HTTP side effect
 
-Web2 agents that need a COMMIT / NO_COMMIT gate in front of an HTTP side effect: [Protect an HTTP side effect with DCL](docs/PROTECT_HTTP_SIDE_EFFECT.md).
+Web2 agents that need a COMMIT / NO_COMMIT gate in front of an HTTP side effect can use `DCLGuard`:
 
 ```python
 from dcl import DCLGuard
 
 guard = DCLGuard(oracle_url="https://webhook.fronesislabs.com")
-decision = guard.check(
-    action="send_email",
-    target="api.example.com",
-    payload={"to": "user@example.com", "subject": "Hello"},
-)
-if decision.allowed:
-    # COMMIT: the HTTP side effect may run.
-    ...
-# NO_COMMIT: do not send the HTTP request.
 
-result = guard.post("https://api.example.com/send", json={"to": "user@example.com"})
-# COMMIT → result.executed is true and one HTTP request was sent.
-# NO_COMMIT → result.executed is false and no HTTP request was sent.
+result = guard.post(
+    "https://api.example.com/send",
+    json={"to": "user@example.com", "subject": "Hello"},
+)
+
+# COMMIT + matching request digest → result.executed is True
+# NO_COMMIT, missing digest, or digest mismatch → result.executed is False
 ```
 
-A live attempt against the documented Oracle and `https://httpbin.org/post` is [examples/production_web2_proof.py](examples/production_web2_proof.py). It uses `guard.post` only. The Oracle call can settle x402 through an adapter outside the guard. The httpbin POST stays unpaid and runs only after `COMMIT`. See [examples/README.md](examples/README.md).
+`DCLGuard.post()` computes a deterministic SHA-256 `request_digest` from:
+
+- HTTP method
+- canonical URL
+- canonical JSON body
+
+The digest is sent to the DCL Oracle with the evaluation request. The HTTP side effect is executed only when the Oracle returns `COMMIT` and its returned `request_digest` exactly matches the locally computed digest.
+
+This binds the authorization decision to the specific HTTP request that will be executed, rather than to an abstract action description.
+
+### Production proof
+
+The repository includes a live production proof using the documented Oracle and `https://httpbin.org/post`:
+
+[Production proof](examples/production_web2_proof.py)
+
+The positive path completed:
+
+Oracle 402 → x402 payment → COMMIT + matching `request_digest` → target POST 200
+
+The negative path completed:
+
+Oracle 402 → x402 payment → NO_COMMIT → target not called
+
+Machine-readable evidence:
+
+- [production_web2_proof.json](examples/production_web2_proof.json)
+- [production_web2_negative_proof.json](examples/production_web2_negative_proof.json)
+
+The proof demonstrates library-level enforcement through `DCLGuard`. It does not provide network-level enforcement or prevent an application from deliberately bypassing the Guard by issuing the HTTP request through another client or execution path.
+
+See [Protect an HTTP side effect with DCL](docs/PROTECT_HTTP_SIDE_EFFECT.md) and [examples/README.md](examples/README.md) for implementation details.
 
 ## License
 

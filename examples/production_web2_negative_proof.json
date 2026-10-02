@@ -1,0 +1,25 @@
+{
+  "proof": "dcl-web2-production-negative",
+  "complete": true,
+  "oracle": {
+    "url": "https://webhook.fronesislabs.com",
+    "http_status": 200,
+    "final_status": 200,
+    "initial_status": 402,
+    "verdict": "NO_COMMIT",
+    "reason": "forbidden: 'jailbreak'",
+    "tx_hash": "0xa244dccca0682a89441f99bc982ec1f260a2493f667e80c72bd1c4a22d846689",
+    "request_digest": "bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e"
+  },
+  "request_digest": "bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e",
+  "target": {
+    "url": "https://httpbin.org/post",
+    "method": "POST",
+    "called": false
+  },
+  "enforcement": {
+    "dcl_checked_before_target": true,
+    "target_called_after_commit": false
+  },
+  "timestamp": "2026-10-02T06:46:17Z"
+}

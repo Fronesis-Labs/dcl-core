@@ -8,19 +8,19 @@ production_web2_proof
   → Oracle /evaluate/fast
   → HTTP 402
   → x402 payment, Oracle URL only
-  → Oracle COMMIT
+  → Oracle COMMIT + matching request_digest
   → DCLGuard unpaid POST
   → https://httpbin.org/post
   → HTTP 200
 ```
 
-The target is called only from inside `DCLGuard.post`, and only when the verdict is `COMMIT`. The payment transport is `examples/oracle_x402_transport.py`. It is not part of `DCLGuard`. If that transport is invoked with any URL other than the Oracle evaluate URL, it refuses before signing and before opening a connection.
+The target is called only from inside `DCLGuard.post`, and only when the verdict is `COMMIT` and the returned `request_digest` matches. The payment transport is `examples/oracle_x402_transport.py`. It is not part of `DCLGuard`. If that transport is invoked with any URL other than the Oracle evaluate URL, it refuses before signing and before opening a connection.
 
 `DCLGuard(...)` with no transport still works and still fails closed. This example is the only place that supplies a wallet.
 
 ## What this proves
 
-A normal Web2 HTTP side effect can sit behind DCL authorization and runs only after the live Oracle returns `COMMIT`.
+A normal Web2 HTTP side effect can sit behind DCL authorization and runs only after the live Oracle returns `COMMIT` with the same `request_digest` the guard computed for that POST.
 
 ## What this does not prove
 
@@ -79,10 +79,10 @@ It then prints JSON with `complete: false`, `stage: "payment credentials not con
 2. Builds an Oracle-only x402 transport and passes it as `DCLGuard(..., transport=...)`.
 3. Calls `guard.post("https://httpbin.org/post", json=payload)` once.
 4. The guard asks the Oracle. The transport records the initial HTTP status. On 402 it asks the x402 client for one payment header, using the network, scheme, and asset in that 402 `accepts` entry, then sends that header only to the same Oracle URL.
-5. The guard sends the httpbin POST with its own unpaid client only after HTTP 200 and `verdict == COMMIT`.
+5. The guard sends the httpbin POST with its own unpaid client only after HTTP 200, `verdict == COMMIT`, and a returned `request_digest` that matches the digest computed for that POST.
 6. Prints one JSON object. Exit code 0 means `complete` is true. Any other outcome exits 1.
 
-`complete` is true only when that single execution observed HTTP 402, one payment attempt, a final Oracle HTTP 200 with `COMMIT`, and a target HTTP 200 from `guard.post`.
+`complete` is true only when that single execution observed HTTP 402, one payment attempt, a final Oracle HTTP 200 with `COMMIT` and the matching `request_digest`, and a target HTTP 200 from `guard.post`.
 
 ## Expected success
 
@@ -115,7 +115,7 @@ A local sandbox, a mocked Oracle, a handwritten `COMMIT`, or a POST issued outsi
 - The external target is `https://httpbin.org/post`, a public request echo. It is not localhost, not the DCL Oracle, and not a Fronesis host.
 - The script does not retry a rejected payment, follow an Oracle redirect, or attach a payment header to the target.
 - Missing payer credentials, a price above `DCL_MAX_PAYMENT_USDC`, a rejected payment, a non-200 Oracle response, and a malformed Oracle body all leave the target uncalled.
-- `DCLGuard.post` also withholds the target unless the Oracle returns the same `request_digest` the guard computed for that POST. Headers are not in the digest. The hosted `EvaluateResponse` does not yet echo `request_digest`, so a live `COMMIT` currently fails closed at that check.
+- `DCLGuard.post` withholds the target unless the Oracle returns the same `request_digest` the guard computed for that POST. Headers are not in the digest. The recorded live run did that: Oracle HTTP 200, `COMMIT`, the same digest, then target HTTP 200. See [production_web2_proof.json](production_web2_proof.json).
 
 ## Negative path
 
@@ -126,3 +126,5 @@ python3 examples/production_web2_negative_proof.py
 ```
 
 `complete` is true only when the Oracle HTTP status is 200, the verdict is a real `NO_COMMIT`, and `target.called` is false. HTTP 402 is recorded as a payment challenge and is not treated as that verdict. The script does not write a local `NO_COMMIT` in place of the Oracle response.
+
+The completed live negative run is [production_web2_negative_proof.json](production_web2_negative_proof.json): Oracle 402, x402 payment, `NO_COMMIT`, target not called.

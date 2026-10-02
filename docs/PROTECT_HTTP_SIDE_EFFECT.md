@@ -10,7 +10,7 @@ application → DCLGuard → DCL Trust Oracle → COMMIT / NO_COMMIT → only CO
 
 ## What DCLGuard protects
 
-It protects the decision to perform an HTTP side effect, such as posting an order or sending an email through an API. `DCLGuard.check` asks an existing DCL Trust Oracle and returns a decision. `DCLGuard.post` sends that POST only when the decision is COMMIT.
+It protects the decision to perform an HTTP side effect, such as posting an order or sending an email through an API. `DCLGuard.check` asks an existing DCL Trust Oracle and returns a decision. `DCLGuard.post` sends that POST only when the decision is COMMIT and the returned `request_digest` matches the request.
 
 A COMMIT verdict means the call may run. It does not mean the payload is a valid order, a correct email, or a successful payment.
 
@@ -30,7 +30,7 @@ A COMMIT verdict means the call may run. It does not mean the payload is a valid
 
 The target is called only when the Oracle returns `COMMIT` and the same `request_digest`. If the digest is missing or different, `guard.post` does not open a connection to the target and the reason is `request digest missing` or `request digest mismatch`. `result.executed` is true only after that request is sent.
 
-The hosted Oracle's current `EvaluateResponse` does not yet echo `request_digest`. Until it does, a live `COMMIT` fails closed at this check. Clients that omit the field are unchanged on the Oracle; this guard always sends it.
+The hosted Oracle echoes `request_digest` on `EvaluateResponse`. The production proof observed a live `COMMIT` whose returned digest matched the guard's digest, and only then called the target. Clients that omit the field still receive `request_digest: null`; this guard always sends it.
 
 `decision.reason` is the Oracle's reason string. `decision.trace_id` (`traceId` in TypeScript) is set only when the Oracle JSON includes a `trace_id` string. `decision.tx_hash` (`txHash`) is passed through when the Oracle included `tx_hash`. The guard does not copy `tx_hash` into `trace_id`. `verify_url` / `verifyUrl` is passed through the same way.
 
@@ -85,7 +85,7 @@ const guard = new DCLGuard({
 
 If that transport is missing, raises, or still returns HTTP 402, `check` returns `allowed: false` and `post` does not call the target. You do not parse a 402 response yourself.
 
-`examples/production_web2_proof.py` is one such adapter. It pays only the Oracle evaluate URL, using the x402 client, and refuses any other URL. The target POST remains the guard's unpaid client and runs only after `COMMIT`. See `examples/README.md`. The guard itself still has no wallet.
+`examples/production_web2_proof.py` pays only the Oracle evaluate URL and refuses any other URL. The target POST remains the guard's unpaid client and runs only after `COMMIT` and a matching `request_digest`. The recorded runs are `examples/production_web2_proof.json` and `examples/production_web2_negative_proof.json`. See `examples/README.md`. The guard itself still has no wallet.
 
 ## What DCLGuard does not do
 
@@ -142,7 +142,7 @@ if decision.allowed:
     requests.post("https://api.example.com/orders", json={"amount": 42})
 ```
 
-The same gate is available as one call. The POST is sent only after `COMMIT`:
+The same gate is available as one call. The POST is sent only after `COMMIT` and a matching `request_digest`:
 
 ```python
 result = guard.post("https://api.example.com/orders", json={"amount": 42})
@@ -150,7 +150,7 @@ if result.executed:
     print(result.status_code, result.text)
 ```
 
-On `NO_COMMIT`, timeout, HTTP 402, HTTP 500, a network error, or a malformed reply, `result.executed` is false and the target receives no request.
+On `NO_COMMIT`, a missing or different `request_digest`, timeout, HTTP 402, HTTP 500, a network error, or a malformed reply, `result.executed` is false and the target receives no request.
 
 ## TypeScript
 
