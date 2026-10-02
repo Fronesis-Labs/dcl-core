@@ -30,7 +30,33 @@ A COMMIT verdict means the call may run. It does not mean the payload is a valid
 
 The target is called only when the Oracle returns `COMMIT` and the same `request_digest`. If the digest is missing or different, `guard.post` does not open a connection to the target and the reason is `request digest missing` or `request digest mismatch`. `result.executed` is true only after that request is sent.
 
-The hosted Oracle echoes `request_digest` on `EvaluateResponse`. The production proof observed a live `COMMIT` whose returned digest matched the guard's digest, and only then called the target. Clients that omit the field still receive `request_digest: null`; this guard always sends it.
+The hosted Oracle echoes `request_digest` on `EvaluateResponse`. The production proof observed a live `COMMIT` whose returned digest matched the guard's digest, and only then called the target. Clients that omit the field still receive `request_digest: null`; this guard always sends it. An empty string is treated as absent.
+
+`verdict` is an exact match. `COMMITTED`, `commit`, `COMMIT ` with a trailing space, and any other value are denials. `allowed` is true only when `verdict == "COMMIT"`.
+
+### Digest preimage
+
+`request_digest(method, url, body)` in `dcl/guard.py` (and `requestDigest` in `packages/dcl/src/guard.ts`) hashes UTF-8 of:
+
+```text
+METHOD
+canonical URL
+canonical JSON body
+```
+
+`canonical_json()` / `canonicalJson()` sort object keys, use compact separators, and keep Unicode (`ensure_ascii=False` in Python). This is not RFC 8785 JCS. `canonical_url()` / `canonicalUrl()` strip whitespace, lowercase the scheme and host, drop the fragment, omit ports 80 and 443, keep other ports, sort query pairs, preserve the path, and use `/` when the path is empty.
+
+A missing body is an empty string, not JSON `null`. `post()` takes `json=` only. Headers, `Authorization`, `Content-Type`, cookies, x402 headers, user-agent, TLS, and connection data are outside the digest. A header that changes the meaning of the request is not cryptographically bound to the Oracle decision.
+
+The checked vector is method `POST`, URL `https://API.Example.com:443/orders?b=2&a=1#fragment`, body `{"z":1,"a":"é"}`, preimage:
+
+```text
+POST
+https://api.example.com/orders?a=1&b=2
+{"a":"é","z":1}
+```
+
+SHA-256 `102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123`. The test hashes that string with SHA-256 directly.
 
 `decision.reason` is the Oracle's reason string. `decision.trace_id` (`traceId` in TypeScript) is set only when the Oracle JSON includes a `trace_id` string. `decision.tx_hash` (`txHash`) is passed through when the Oracle included `tx_hash`. The guard does not copy `tx_hash` into `trace_id`. `verify_url` / `verifyUrl` is passed through the same way.
 
@@ -46,10 +72,21 @@ The Oracle call has one timeout and is not retried. The guard denies the side ef
 - the connection fails
 - the Oracle returns HTTP 402, including when the body says `COMMIT`
 - the Oracle returns any other non-200 status, including HTTP 500
-- the Oracle redirects. The default client does not follow them, because `Location` could be the target. A custom `transport` is responsible for its own requests; the guard still will not call the target unless that transport returns a COMMIT verdict
+- the Oracle redirects. The default client does not follow them. A custom `transport` is responsible for its own requests; the guard still will not call the target unless that transport returns exact `COMMIT` and the same digest
+- the target responds with a redirect. The client does not open `Location`. `executed` is false. The digested URL may already have received that first POST
 - the body is not a well-formed verdict: not JSON, `{}`, an unknown verdict, a missing or non-string `reason`, or any shape other than `COMMIT` or `NO_COMMIT` plus a string `reason` on HTTP 200
 
 HTTP 200 by itself is not permission. Confidence, the wording of `reason`, and any `allowed` flag in the body are not permission.
+
+## Trust boundary
+
+Request-digest binding, Oracle transport authentication, and audit-chain verification are separate.
+
+The guard compares two strings: the digest it computed and `request_digest` in the Oracle JSON. It does not verify a signature over that JSON. Oracle responses are not cryptographically signed. `DCLGuard` trusts HTTPS/TLS to the configured Oracle URL. The guard protocol has no nonce, expiry, or replay counter. Adding those would change the protocol; this library does not.
+
+`oracle.tx_hash` on a live response is the chain identifier from the Oracle. `ChainState.append` defines it as `0x` plus SHA-256 of the canonical audit record. It is not a Base transaction hash. `dcl_core.verify_chain()` needs the full record (`index`, `prev_hash`, `input_hash`, `policy_hash`, `confidence`, `timestamp`, `drift_context`, and the other canonical fields). The production proof JSON does not include that record, so it is not an offline chain proof.
+
+Enforcement is inside the process that calls `DCLGuard.post()`. Another HTTP client in the same application is outside that boundary.
 
 ## Pass a payment-capable transport
 
@@ -85,7 +122,16 @@ const guard = new DCLGuard({
 
 If that transport is missing, raises, or still returns HTTP 402, `check` returns `allowed: false` and `post` does not call the target. You do not parse a 402 response yourself.
 
-`examples/production_web2_proof.py` pays only the Oracle evaluate URL and refuses any other URL. The target POST remains the guard's unpaid client and runs only after `COMMIT` and a matching `request_digest`. The recorded runs are `examples/production_web2_proof.json` and `examples/production_web2_negative_proof.json`. See `examples/README.md`. The guard itself still has no wallet.
+`examples/production_web2_proof.py` is outside the guard. It pays only the Oracle evaluate URL and refuses any other URL. The payer key is the first non-empty value of `DCL_PAYER_PRIVATE_KEY`, `X402_PRIVATE_KEY`, or `PRIVATE_KEY`. `DCL_MAX_PAYMENT_USDC` defaults to `0.01`. The guard does not read those variables and does not sign the payment. The target POST remains the guard's unpaid client and runs only after exact `COMMIT`, a matching `request_digest`, and a non-redirect response.
+
+The recorded runs were taken at commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e`:
+
+- `examples/production_web2_proof.json` at `2026-10-02T06:45:16Z`. Digest `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019`. Oracle chain id `0xaa13b48b6089eb31c9050719b61705d2a33dce911e0299b32c5244cb8821db83`. Payment transaction `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`.
+- `examples/production_web2_negative_proof.json` at `2026-10-02T06:46:17Z`. Digest `bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e`. Oracle chain id `0xa244dccca0682a89441f99bc982ec1f260a2493f667e80c72bd1c4a22d846689`. `target.called` is false because this client did not call the target. httpbin does not contribute an independent counter.
+
+Do not commit a private key or a seed phrase. Use a dedicated wallet with a small balance, not a treasury or personal wallet.
+
+See `examples/README.md`. The guard itself still has no wallet.
 
 ## What DCLGuard does not do
 

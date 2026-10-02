@@ -82,10 +82,12 @@ def _optional_str(value: Any) -> str | None:
 
 
 def canonical_json(value: Any) -> str:
-    """Compact JSON with sorted object keys and preserved Unicode.
+    """This package's deterministic JSON encoding, not RFC 8785 JCS.
 
-    ``None`` is not valid here. Callers that have no body use an empty
-    string instead, so a missing body does not hash as JSON ``null``.
+    Object keys are sorted. Separators are compact. Unicode is preserved
+    (``ensure_ascii=False``). Arrays keep their order. ``None`` is not valid
+    here. Callers that have no body use an empty string instead, so a
+    missing body does not hash as JSON ``null``.
     """
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -157,12 +159,20 @@ def _describe_action(action: str, target: str, payload: Any) -> str:
 class _DenyRedirects(urllib.request.HTTPRedirectHandler):
     """Refuse 3xx instead of following Location.
 
-    A redirect could point at the side-effect target. Following it would
-    perform that call before a verdict exists.
+    A redirect could point at a URL that was not covered by the request
+    digest. Following it would perform that call.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+class TargetRedirectRefused(Exception):
+    """The digested target URL answered with a redirect. Location was not opened."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        super().__init__(f"target redirect refused (HTTP {status})")
 
 
 def _urllib_transport(url: str, body: Mapping[str, Any], timeout: float) -> OracleHttpResponse:
@@ -271,11 +281,18 @@ def _execute_post(
     if headers:
         hdrs.update({str(key): str(value) for key, value in headers.items()})
     request = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    opener = urllib.request.build_opener(_DenyRedirects)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
+            if 300 <= response.status < 400:
+                raise TargetRedirectRefused(response.status)
             raw = response.read()
             return response.status, raw.decode("utf-8", errors="replace")
+    except TargetRedirectRefused:
+        raise
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise TargetRedirectRefused(exc.code) from exc
         raw = exc.read()
         return exc.code, raw.decode("utf-8", errors="replace")
 
@@ -387,11 +404,15 @@ class DCLGuard:
     ) -> SideEffectResult:
         """POST ``json`` to ``url`` only after DCL returns COMMIT for this request.
 
-        The guard hashes the method, canonical URL, and canonical JSON body,
-        sends that ``request_digest`` to the Oracle, and opens the target
-        only when the verdict is COMMIT and the returned digest is identical.
-        A missing or different digest, or any non-COMMIT outcome, leaves the
-        target untouched.
+        The guard hashes the method, canonical URL, and canonical JSON body.
+        Headers are not hashed. ``json`` is the only body parameter; there
+        is no ``data`` or ``files`` argument. A missing body hashes as an
+        empty string, not JSON ``null``.
+
+        The target is opened only when the verdict is exactly ``COMMIT`` and
+        the returned digest is identical. A redirect from that URL is not
+        followed: ``Location`` is not requested, and the result is fail-closed.
+        The digested host may already have received the first POST.
         """
         try:
             expected = request_digest("POST", url, json)
@@ -429,7 +450,22 @@ class DCLGuard:
             return SideEffectResult(decision=decision, executed=False)
 
         wait = self.timeout if timeout is None else float(timeout)
-        status_code, text = _execute_post(url, json, headers, wait)
+        try:
+            status_code, text = _execute_post(url, json, headers, wait)
+        except TargetRedirectRefused:
+            return SideEffectResult(
+                decision=Decision(
+                    allowed=False,
+                    verdict="NO_COMMIT",
+                    reason="target redirect refused",
+                    trace_id=decision.trace_id,
+                    tx_hash=decision.tx_hash,
+                    verify_url=decision.verify_url,
+                    event_id=decision.event_id,
+                    request_digest=decision.request_digest,
+                ),
+                executed=False,
+            )
         return SideEffectResult(
             decision=decision,
             executed=True,

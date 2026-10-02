@@ -132,42 +132,122 @@ result = guard.post(
     json={"to": "user@example.com", "subject": "Hello"},
 )
 
-# COMMIT + matching request digest → result.executed is True
-# NO_COMMIT, missing digest, or digest mismatch → result.executed is False
+# result.executed is True only for exact COMMIT, a matching digest,
+# and a non-redirect response from that URL.
 ```
 
-`DCLGuard.post()` computes a deterministic SHA-256 `request_digest` from:
+`from dcl import DCLGuard` is the public guard import. `from dcl_core import ChainState` is the chain import. This distribution publishes both packages (`pyproject.toml` includes `dcl` and `dcl_core*`). They are not the same module.
 
-- HTTP method
-- canonical URL
-- canonical JSON body
+`post()` accepts `json=`. It does not accept `data=` or `files=`. A missing JSON body is hashed as an empty string, not as JSON `null`.
 
-The digest is sent to the DCL Oracle with the evaluation request. The HTTP side effect is executed only when the Oracle returns `COMMIT` and its returned `request_digest` exactly matches the locally computed digest.
+### Request binding
 
-This binds the authorization decision to the specific HTTP request that will be executed, rather than to an abstract action description.
+`dcl.guard.request_digest()` is SHA-256 (hex, no `0x`) of this preimage, UTF-8:
+
+```text
+METHOD
+canonical URL
+canonical JSON body
+```
+
+`METHOD` is stripped and uppercased. The digest includes the HTTP method, the canonical URL, and the canonical JSON body.
+
+The digest does not include HTTP headers, `Authorization`, `Content-Type`, x402 headers, cookies, `User-Agent`, other transport metadata, TLS metadata, or the network connection. `post()` can still send `headers=` to the target after COMMIT. Those headers are not sent to the Oracle and are not in the digest.
+
+If a header changes what the request means, the Oracle decision is not cryptographically bound to that header.
+
+### Canonicalization
+
+This is this package's own deterministic scheme. It is not RFC 8785 JCS.
+
+- `dcl.guard.canonical_json()`: sorted object keys, compact separators `( ",", ":" )`, `ensure_ascii=False`. Array order is preserved. No Unicode normalization.
+- `dcl.guard.canonical_url()`: strip surrounding whitespace, lowercase scheme and hostname, drop the fragment, omit default ports 80 and 443, keep any other port, sort decoded query pairs and encode them again, keep the path, and use `/` when the path is empty.
+
+A published vector is tested by hashing that exact preimage, not by calling `request_digest()` twice. Method `POST`, URL `https://API.Example.com:443/orders?b=2&a=1#fragment`, JSON `{"z":1,"a":"é"}` canonicalizes to:
+
+```text
+POST
+https://api.example.com/orders?a=1&b=2
+{"a":"é","z":1}
+```
+
+SHA-256: `102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123`.
+
+Semantically similar URLs or JSON values that this scheme does not normalize (path percent-encoding, object key duplicates, `1` versus `1.0`) produce different digests. That is the current scheme, not an accident to paper over.
+
+### Enforcement boundary
+
+This is library-level enforcement inside the process that calls `DCLGuard.post()`. It does not enforce anything at the network. An application can still POST the same URL with another client and skip the guard.
+
+### Oracle trust boundary
+
+Three different things:
+
+1. Request-digest binding: the guard compares the digest it computed with the `request_digest` string in the Oracle JSON.
+2. Oracle transport: the default client uses HTTPS/TLS to the configured Oracle URL and does not follow Oracle redirects. The guard does not verify an Oracle response signature.
+3. Audit-chain verification: `dcl_core.verify_chain()` recomputes a chain record hash. The guard does not do that.
+
+Oracle responses are not cryptographically signed. `DCLGuard` trusts the HTTPS/TLS connection to the configured Oracle endpoint. The current guard protocol does not provide independent response signature verification. There is no nonce, expiry, or replay counter in the guard response protocol. Signature and replay protection would be a protocol change; this release does not add them.
+
+`verdict` must be exactly `COMMIT` or exactly `NO_COMMIT`. `COMMITTED`, `commit`, `COMMIT `, and any other string are denials. `allowed` is true only when `verdict == "COMMIT"`.
+
+### Failure behavior
+
+These outcomes are fail-closed in `tests/test_dcl_guard.py` and `packages/dcl/test/guard.test.ts`. `result.executed` is false and the target server used by the test receives no request, except the target-redirect case noted below:
+
+- Oracle HTTP 402, including a body that says `COMMIT`
+- Oracle HTTP 404 and HTTP 500
+- Oracle timeout
+- Oracle connection failure
+- any other exception from the Oracle transport
+- malformed JSON, JSON that is not an object, missing verdict, unknown verdict, missing or non-string `reason`
+- `COMMIT` with no `request_digest`, an empty digest, or a different digest
+- `NO_COMMIT`
+- Oracle HTTP redirect (not followed)
+- target HTTP redirect (not followed; see below)
+
+### Redirect behavior
+
+The default Oracle client (`_urllib_transport`, and `redirect: "manual"` in TypeScript) does not follow a 3xx from the Oracle. The guard then denies the side effect. A custom `transport` is responsible for its own Oracle requests; the guard still will not call the target unless that transport returns exact `COMMIT` plus the matching digest.
+
+The target POST also does not follow redirects. `urllib` redirect codes are turned into `TargetRedirectRefused` (TypeScript uses `redirect: "manual"`). `executed` is false and `Location` is not requested. The POST to the digested URL has already been sent, so that host may have seen the request. The redirect destination is not contacted.
 
 ### Production proof
 
-The repository includes a live production proof using the documented Oracle and `https://httpbin.org/post`:
+Live runs against `https://webhook.fronesislabs.com` and `https://httpbin.org/post`, from commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e`:
 
 [Production proof](examples/production_web2_proof.py)
 
-The positive path completed:
+Positive path, `2026-10-02T06:45:16Z`: Oracle 402 → x402 payment → `COMMIT` with `request_digest` `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019` → target POST 200.
 
-Oracle 402 → x402 payment → COMMIT + matching `request_digest` → target POST 200
+Negative path, `2026-10-02T06:46:17Z`: Oracle 402 → x402 payment → `NO_COMMIT` (`forbidden: 'jailbreak'`) with `request_digest` `bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e` → the guard did not call the target.
 
-The negative path completed:
-
-Oracle 402 → x402 payment → NO_COMMIT → target not called
-
-Machine-readable evidence:
+Evidence:
 
 - [production_web2_proof.json](examples/production_web2_proof.json)
 - [production_web2_negative_proof.json](examples/production_web2_negative_proof.json)
 
-The proof demonstrates library-level enforcement through `DCLGuard`. It does not provide network-level enforcement or prevent an application from deliberately bypassing the Guard by issuing the HTTP request through another client or execution path.
+`oracle.tx_hash` is the identifier the Oracle returned. In the DCL chain, `ChainState.append` sets that field to `0x` plus the SHA-256 of the canonical audit-chain record. It is not a Base blockchain transaction hash. Positive: `0xaa13b48b6089eb31c9050719b61705d2a33dce911e0299b32c5244cb8821db83`. Negative: `0xa244dccca0682a89441f99bc982ec1f260a2493f667e80c72bd1c4a22d846689`.
 
-See [Protect an HTTP side effect with DCL](docs/PROTECT_HTTP_SIDE_EFFECT.md) and [examples/README.md](examples/README.md) for implementation details.
+`payment.tx_hash` on the positive proof is the x402 settlement transaction: `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`.
+
+### Evidence limitations
+
+The production proof shows what this client observed: the 402, one Oracle payment, the Oracle JSON, the digest comparison, the COMMIT or NO_COMMIT branch, and whether `DCLGuard.post()` then called the target.
+
+The negative proof's `target.called: false` means this client did not run the target POST after `NO_COMMIT`. `httpbin.org` does not provide an independent call counter in this proof. The proof does not show that no other client reached httpbin.
+
+The JSON does not contain the audit-chain fields `verify_chain()` needs (`index`, `prev_hash`, `input_hash`, `policy_hash`, `confidence`, `timestamp`, `drift_context`, and the rest of the canonical record). It is not an offline cryptographic proof of the Oracle verdict, and it does not authenticate the Oracle response.
+
+It also does not provide network-level enforcement or stop another code path from skipping `DCLGuard`.
+
+### Payment
+
+x402 payment is not part of `DCLGuard`. The proof script passes `examples/oracle_x402_transport.py` as the Oracle `transport`. That adapter reads the first non-empty value among `DCL_PAYER_PRIVATE_KEY`, `X402_PRIVATE_KEY`, and `PRIVATE_KEY`, and it will not pay more than `DCL_MAX_PAYMENT_USDC` (default `0.01`). The guard never sees the key and never signs a payment. The target POST stays unpaid.
+
+Do not commit a private key or a seed phrase. Use a dedicated wallet for automated x402 payments, keep only a small operational balance, and do not point this adapter at a treasury or personal wallet. Rotate a credential that has been exposed.
+
+See [Protect an HTTP side effect with DCL](docs/PROTECT_HTTP_SIDE_EFFECT.md) and [examples/README.md](examples/README.md).
 
 ## License
 

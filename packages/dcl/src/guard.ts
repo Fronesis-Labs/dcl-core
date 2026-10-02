@@ -367,7 +367,28 @@ export class DCLGuard {
     }
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     init.signal = AbortSignal.timeout(timeoutMs);
+    // Do not follow a target redirect. Location is outside the digest.
+    init.redirect = "manual";
     const response = await fetch(url, init);
+    const redirected =
+      response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400);
+    if (redirected) {
+      return {
+        decision: decision({
+          allowed: false,
+          verdict: "NO_COMMIT",
+          reason: "target redirect refused",
+          traceId: verdict.traceId,
+          txHash: verdict.txHash,
+          verifyUrl: verdict.verifyUrl,
+          eventId: verdict.eventId,
+          requestDigest: verdict.requestDigest,
+        }),
+        executed: false,
+        statusCode: null,
+        text: null,
+      };
+    }
     const text = await response.text();
     return {
       decision: verdict,
