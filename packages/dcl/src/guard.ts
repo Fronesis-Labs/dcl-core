@@ -18,6 +18,13 @@ export interface Decision {
   /** Passed through from Oracle `tx_hash` when that field is a non-empty string. */
   txHash: string | null;
   verifyUrl: string | null;
+  /** Passed through from Oracle `event_id`. Never copied from `tx_hash`. */
+  eventId: string | null;
+  /**
+   * HTTP intent digest returned by the Oracle.
+   * This is not the audit-chain `input_hash`.
+   */
+  requestDigest: string | null;
 }
 
 export interface SideEffectResult {
@@ -78,6 +85,8 @@ function deny(reason: string): Decision {
     traceId: null,
     txHash: null,
     verifyUrl: null,
+    eventId: null,
+    requestDigest: null,
   });
 }
 
@@ -93,7 +102,7 @@ export function describeAction(action: string, target: string, payload: unknown)
   return lines.join("\n");
 }
 
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
@@ -105,6 +114,60 @@ function canonicalJson(value: unknown): string {
   return `{${keys
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
     .join(",")}}`;
+}
+
+export function canonicalUrl(url: string): string {
+  const trimmed = url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return trimmed;
+  }
+  const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+  let host = parsed.hostname.toLowerCase();
+  if (host.includes(":")) {
+    host = `[${host}]`;
+  }
+  const port = parsed.port;
+  const defaultPort = (scheme === "http" && port === "80") || (scheme === "https" && port === "443");
+  if (port && !defaultPort) {
+    host = `${host}:${port}`;
+  }
+  if (parsed.username) {
+    const auth = parsed.password ? `${parsed.username}:${parsed.password}` : parsed.username;
+    host = `${auth}@${host}`;
+  }
+  const path = parsed.pathname || "/";
+  const pairs: [string, string][] = [];
+  parsed.searchParams.forEach((value, key) => {
+    pairs.push([key, value]);
+  });
+  pairs.sort((left, right) => {
+    if (left[0] < right[0]) return -1;
+    if (left[0] > right[0]) return 1;
+    if (left[1] < right[1]) return -1;
+    if (left[1] > right[1]) return 1;
+    return 0;
+  });
+  const query = pairs
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join("&");
+  return query ? `${scheme}://${host}${path}?${query}` : `${scheme}://${host}${path}`;
+}
+
+export async function requestDigest(method: string, url: string, body?: unknown): Promise<string> {
+  if (!method || !method.trim()) {
+    throw new Error("method is required");
+  }
+  if (!url || !url.trim()) {
+    throw new Error("url is required");
+  }
+  const canonicalBody = body === undefined ? "" : canonicalJson(body);
+  const material = `${method.trim().toUpperCase()}\n${canonicalUrl(url)}\n${canonicalBody}`;
+  const bytes = new TextEncoder().encode(material);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function isTimeout(error: unknown): boolean {
@@ -135,7 +198,7 @@ async function fetchTransport(
   return { status: response.status, body: await response.text() };
 }
 
-function decisionFromHttp(status: number, body: string): Decision {
+function decisionFromHttp(status: number, body: string, expectedDigest: string | null): Decision {
   if (status === 402) {
     return deny("payment required and could not be completed");
   }
@@ -159,13 +222,33 @@ function decisionFromHttp(status: number, body: string): Decision {
   }
   const parsedVerdict = verdict === "COMMIT" ? "COMMIT" : "NO_COMMIT";
   // trace_id and tx_hash are different fields. Do not copy one into the other.
+  // request_digest is the HTTP intent digest, not input_hash.
+  const traceId = optionalString(record.trace_id);
+  const txHash = optionalString(record.tx_hash);
+  const verifyUrl = optionalString(record.verify_url);
+  const eventId = optionalString(record.event_id);
+  const returnedDigest = optionalString(record.request_digest);
+  if (parsedVerdict === "COMMIT" && expectedDigest !== null && returnedDigest !== expectedDigest) {
+    return decision({
+      allowed: false,
+      verdict: "NO_COMMIT",
+      reason: returnedDigest === null ? "request digest missing" : "request digest mismatch",
+      traceId,
+      txHash,
+      verifyUrl,
+      eventId,
+      requestDigest: returnedDigest,
+    });
+  }
   return decision({
     allowed: parsedVerdict === "COMMIT",
     verdict: parsedVerdict,
     reason,
-    traceId: optionalString(record.trace_id),
-    txHash: optionalString(record.tx_hash),
-    verifyUrl: optionalString(record.verify_url),
+    traceId,
+    txHash,
+    verifyUrl,
+    eventId,
+    requestDigest: returnedDigest,
   });
 }
 
@@ -204,8 +287,10 @@ export class DCLGuard {
     }
 
     let described: string;
+    let digest: string;
     try {
       described = describeAction(input.action, input.target, input.payload);
+      digest = await requestDigest(input.action, input.target, input.payload);
     } catch {
       return deny("action payload is not JSON-serializable");
     }
@@ -214,6 +299,7 @@ export class DCLGuard {
       response: described,
       agent_id: input.agentId ?? this.agentId,
       task_type: "http_side_effect",
+      request_digest: digest,
     };
     const timeoutMs = input.timeoutMs ?? this.timeoutMs;
     const url = `${this.oracleUrl}/evaluate/${tier}`;
@@ -229,7 +315,7 @@ export class DCLGuard {
     if (!result || typeof result.status !== "number" || typeof result.body !== "string") {
       return deny("malformed oracle response");
     }
-    return decisionFromHttp(result.status, result.body);
+    return decisionFromHttp(result.status, result.body, digest);
   }
 
   /**
@@ -237,14 +323,37 @@ export class DCLGuard {
    * On any denial the target receives no request.
    */
   async post(url: string, options: PostOptions = {}): Promise<SideEffectResult> {
-    const decision = await this.check({
+    let expected: string;
+    try {
+      expected = await requestDigest("POST", url, options.json);
+    } catch {
+      return {
+        decision: deny("action payload is not JSON-serializable"),
+        executed: false,
+        statusCode: null,
+        text: null,
+      };
+    }
+    let verdict = await this.check({
       action: "POST",
       target: url,
       payload: options.json,
       timeoutMs: options.timeoutMs,
     });
-    if (decision.verdict !== "COMMIT" || !decision.allowed) {
-      return { decision, executed: false, statusCode: null, text: null };
+    if (verdict.verdict !== "COMMIT" || !verdict.allowed || verdict.requestDigest !== expected) {
+      if (verdict.verdict === "COMMIT" && verdict.requestDigest !== expected) {
+        verdict = decision({
+          allowed: false,
+          verdict: "NO_COMMIT",
+          reason: verdict.requestDigest === null ? "request digest missing" : "request digest mismatch",
+          traceId: verdict.traceId,
+          txHash: verdict.txHash,
+          verifyUrl: verdict.verifyUrl,
+          eventId: verdict.eventId,
+          requestDigest: verdict.requestDigest,
+        });
+      }
+      return { decision: verdict, executed: false, statusCode: null, text: null };
     }
 
     const headers: Record<string, string> = { Accept: "application/json" };
@@ -261,7 +370,7 @@ export class DCLGuard {
     const response = await fetch(url, init);
     const text = await response.text();
     return {
-      decision,
+      decision: verdict,
       executed: true,
       statusCode: response.status,
       text,

@@ -16,7 +16,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dcl import DCLGuard, LocalSandbox
-from dcl.guard import Decision, OracleHttpResponse
+from dcl.guard import Decision, OracleHttpResponse, request_digest
 
 
 class _ThreadingServer(ThreadingHTTPServer):
@@ -60,7 +60,13 @@ class ScriptedOracle:
                     self.end_headers()
                     return
                 if oracle.mode == "commit":
+                    status, payload = 200, _with_request_digest(raw, oracle.body or _commit_body())
+                elif oracle.mode == "commit-omit-digest":
                     status, payload = 200, oracle.body or _commit_body()
+                elif oracle.mode == "commit-bad-digest":
+                    body = json.loads((oracle.body or _commit_body()).decode())
+                    body["request_digest"] = "0" * 64
+                    status, payload = 200, json.dumps(body).encode()
                 elif oracle.mode == "block":
                     status, payload = 200, _block_body()
                 elif oracle.mode == "malformed":
@@ -123,6 +129,25 @@ class EffectServer:
     def close(self) -> None:
         self._server.shutdown()
         self._server.server_close()
+
+
+def _with_request_digest(raw: bytes, payload: bytes) -> bytes:
+    """Echo the caller's request_digest so a COMMIT is bound to that request."""
+    try:
+        incoming = json.loads(raw.decode("utf-8"))
+        digest = incoming.get("request_digest") if isinstance(incoming, dict) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        digest = None
+    if not isinstance(digest, str) or not digest:
+        return payload
+    try:
+        body = json.loads(payload.decode("utf-8"))
+    except json.JSONDecodeError:
+        return payload
+    if isinstance(body, dict):
+        body["request_digest"] = digest
+        return json.dumps(body).encode("utf-8")
+    return payload
 
 
 def _commit_body() -> bytes:
@@ -204,7 +229,8 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(len(self.effect.hits), 2)
 
             sent = json.loads(oracle.hits[0]["body"])  # type: ignore[arg-type]
-            self.assertEqual(set(sent), {"response", "agent_id", "task_type"})
+            self.assertEqual(set(sent), {"response", "agent_id", "task_type", "request_digest"})
+            self.assertEqual(sent["request_digest"], request_digest("POST", self.effect.url, payload))
             self.assertIn("action: POST", sent["response"])
             self.assertIn(self.effect.url, sent["response"])
             self.assertIn('"amount":42', sent["response"])
@@ -335,6 +361,11 @@ class GuardTests(unittest.TestCase):
         ]
         for body, trace_id, tx_hash, allowed in samples:
             with self.subTest(body=body):
+                if allowed:
+                    body = {
+                        **body,
+                        "request_digest": request_digest("POST", self.effect.url, {"amount": 1}),
+                    }
                 oracle = ScriptedOracle("raw", body=json.dumps(body).encode())
                 try:
                     result = self._guard(oracle).post(self.effect.url, json={"amount": 1})
@@ -437,7 +468,13 @@ class GuardTests(unittest.TestCase):
 
     def test_allowed_flag_cannot_disagree_with_verdict(self) -> None:
         body = json.dumps(
-            {"verdict": "COMMIT", "reason": "yes", "allowed": False, "confidence": 0}
+            {
+                "verdict": "COMMIT",
+                "reason": "yes",
+                "allowed": False,
+                "confidence": 0,
+                "request_digest": request_digest("POST", self.effect.url, {"amount": 3}),
+            }
         ).encode()
         oracle = ScriptedOracle("raw", body=body)
         try:
@@ -503,7 +540,7 @@ class GuardTests(unittest.TestCase):
             calls.append(url)
             if self.effect.url in url:
                 developer_post(self.effect.url, {"via": "transport"})
-            return OracleHttpResponse(status=200, body=_commit_body())
+            return OracleHttpResponse(status=200, body=_with_request_digest(json.dumps(body).encode(), _commit_body()))
 
         guard = DCLGuard("http://oracle.test", timeout=2, transport=transport)
         result = guard.post(self.effect.url, json={"amount": 7})
@@ -531,6 +568,50 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(result.decision.allowed, result.decision.verdict == "COMMIT")
         self.assertEqual(self.effect.hits, [])
         self.assertEqual(len(oracle.hits), 2)
+
+
+class RequestDigestTests(unittest.TestCase):
+    def test_digest_is_stable_across_json_key_order(self) -> None:
+        url = "https://API.Example.com:443/orders?b=2&a=1#fragment"
+        left = request_digest("post", url, {"z": 1, "a": "é"})
+        right = request_digest("POST", url, {"a": "é", "z": 1})
+        self.assertEqual(left, right)
+        self.assertEqual(len(left), 64)
+        self.assertNotEqual(left, request_digest("PUT", url, {"a": "é", "z": 1}))
+        self.assertNotEqual(left, request_digest("POST", "https://api.example.com/orders?a=1&b=3", {"a": "é", "z": 1}))
+        self.assertNotEqual(left, request_digest("POST", url, {"a": "é", "z": 2}))
+        self.assertNotEqual(left, request_digest("POST", url, None))
+
+    def test_digest_mismatch_does_not_call_the_target(self) -> None:
+        oracle = ScriptedOracle("commit-bad-digest")
+        effect = EffectServer()
+        try:
+            guard = DCLGuard(oracle.url, timeout=0.3)
+            result = guard.post(effect.url, json={"amount": 42})
+            self.assertEqual(len(oracle.hits), 1)
+            self.assertEqual(effect.hits, [])
+            self.assertFalse(result.executed)
+            self.assertEqual(result.decision.verdict, "NO_COMMIT")
+            self.assertEqual(result.decision.reason, "request digest mismatch")
+            self.assertEqual(result.decision.request_digest, "0" * 64)
+        finally:
+            oracle.close()
+            effect.close()
+
+    def test_missing_digest_does_not_call_the_target(self) -> None:
+        oracle = ScriptedOracle("commit-omit-digest")
+        effect = EffectServer()
+        try:
+            guard = DCLGuard(oracle.url, timeout=0.3)
+            result = guard.post(effect.url, json={"amount": 42})
+            self.assertEqual(len(oracle.hits), 1)
+            self.assertEqual(effect.hits, [])
+            self.assertFalse(result.executed)
+            self.assertEqual(result.decision.reason, "request digest missing")
+            self.assertIsNone(result.decision.request_digest)
+        finally:
+            oracle.close()
+            effect.close()
 
 
 class SandboxTests(unittest.TestCase):

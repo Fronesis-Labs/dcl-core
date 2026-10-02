@@ -19,14 +19,18 @@ A COMMIT verdict means the call may run. It does not mean the payload is a valid
 1. Your code chooses an action, a target, and a payload.
 2. `DCLGuard` POSTs that description to `{oracle_url}/evaluate/{tier}` (`fast` by default).
 3. The Oracle answers with a verdict.
-4. The only permission is HTTP 200, `verdict` exactly `COMMIT`, and a string `reason`.
+4. The only permission is HTTP 200, `verdict` exactly `COMMIT`, a string `reason`, and a `request_digest` that matches the request the guard is about to send.
 5. `guard.post` then makes a separate HTTP POST to the target. That call does not go through the Oracle transport.
 
 ## COMMIT
 
 `decision.allowed` is true only when `decision.verdict` is `COMMIT`. Those two cannot disagree.
 
-`guard.post` sends one HTTP request to the target after that verdict. `result.executed` is true only after that request is sent.
+`guard.post` hashes the HTTP method, the canonical URL, and the canonical JSON body with SHA-256 and sends that value as `request_digest`. Headers are not part of the digest: they are transport data, and an x402 payment header must not become part of the authorized target request or be forwarded to it. The digest is not the Oracle audit-chain `input_hash`.
+
+The target is called only when the Oracle returns `COMMIT` and the same `request_digest`. If the digest is missing or different, `guard.post` does not open a connection to the target and the reason is `request digest missing` or `request digest mismatch`. `result.executed` is true only after that request is sent.
+
+The hosted Oracle's current `EvaluateResponse` does not yet echo `request_digest`. Until it does, a live `COMMIT` fails closed at this check. Clients that omit the field are unchanged on the Oracle; this guard always sends it.
 
 `decision.reason` is the Oracle's reason string. `decision.trace_id` (`traceId` in TypeScript) is set only when the Oracle JSON includes a `trace_id` string. `decision.tx_hash` (`txHash`) is passed through when the Oracle included `tx_hash`. The guard does not copy `tx_hash` into `trace_id`. `verify_url` / `verifyUrl` is passed through the same way.
 

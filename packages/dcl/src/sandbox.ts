@@ -82,9 +82,13 @@ export class LocalSandbox {
 
   private decide(raw: string): Record<string, unknown> {
     let responseText = "";
+    let echoed: string | null = null;
     try {
-      const incoming = JSON.parse(raw) as { response?: unknown };
+      const incoming = JSON.parse(raw) as { response?: unknown; request_digest?: unknown };
       responseText = typeof incoming.response === "string" ? incoming.response : "";
+      if (typeof incoming.request_digest === "string" && incoming.request_digest) {
+        echoed = incoming.request_digest;
+      }
     } catch {
       responseText = "";
     }
@@ -108,6 +112,7 @@ export class LocalSandbox {
       drift_score: 0,
       seal_text: "",
       verify_url: "",
+      ...(echoed ? { request_digest: echoed } : {}),
     };
   }
 

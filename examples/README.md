@@ -115,3 +115,14 @@ A local sandbox, a mocked Oracle, a handwritten `COMMIT`, or a POST issued outsi
 - The external target is `https://httpbin.org/post`, a public request echo. It is not localhost, not the DCL Oracle, and not a Fronesis host.
 - The script does not retry a rejected payment, follow an Oracle redirect, or attach a payment header to the target.
 - Missing payer credentials, a price above `DCL_MAX_PAYMENT_USDC`, a rejected payment, a non-200 Oracle response, and a malformed Oracle body all leave the target uncalled.
+- `DCLGuard.post` also withholds the target unless the Oracle returns the same `request_digest` the guard computed for that POST. Headers are not in the digest. The hosted `EvaluateResponse` does not yet echo `request_digest`, so a live `COMMIT` currently fails closed at that check.
+
+## Negative path
+
+`examples/production_web2_negative_proof.py` calls the live Oracle through `DCLGuard.post`. The body contains the published default-policy forbidden token `jailbreak`. The target stays `https://httpbin.org/post`.
+
+```bash
+python3 examples/production_web2_negative_proof.py
+```
+
+`complete` is true only when the Oracle HTTP status is 200, the verdict is a real `NO_COMMIT`, and `target.called` is false. HTTP 402 is recorded as a payment challenge and is not treated as that verdict. The script does not write a local `NO_COMMIT` in place of the Oracle response.
