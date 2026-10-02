@@ -9,7 +9,7 @@ description = "Tamper-evident record chain, offline chain verification, and mult
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["cryptography>=41"]
 authors = [{ name = "Fronesis Labs" }]
 keywords = ["mcp", "model-context-protocol", "audit", "hash-chain", "ai-agents", "x402"]
 classifiers = [

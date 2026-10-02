@@ -1,8 +1,8 @@
 # Signed Oracle decision envelope v1
 
-Status: specification only. `DCLGuard` does not parse, sign, or verify this envelope. The production Oracle is unchanged. No nonce store is added here.
+Status: Python `DCLGuard` verifies this envelope when the caller passes `trust`. `trust=None` keeps the unsigned Oracle JSON, and passing `trust` does not reject that JSON. A signed wrapper without `trust` is a denial. The TypeScript guard does not verify envelopes yet. The production Oracle is unchanged. No nonce store is added here.
 
-This document is the contract a later Python and TypeScript implementation must follow byte for byte. It is not an instruction to turn verification on.
+This document is the contract both implementations follow byte for byte. Supplying `trust` is what turns Python verification on.
 
 ## Compatibility
 
@@ -134,7 +134,7 @@ A side effect may be treated as `COMMIT` only when all of the following are true
 - `envelope.trace_id` is the trace id taken from that verified envelope;
 - `envelope.verdict` is exactly `COMMIT`.
 
-A valid signature over `NO_COMMIT` is a verified denial, not a `COMMIT`. Any failed check is a denial. The current code does none of these checks.
+A valid signature over `NO_COMMIT` is a verified denial, not a `COMMIT`. Any failed check is a denial. Python `DCLGuard` performs these checks when `trust` is set, except nonce replay. The TypeScript guard does not yet. Nonce replay storage is still not implemented.
 
 The nonce replay layer is an additional future denial. It is not one of the checks this release implements, and a missing store must not be filled in by calling the signature check a replay check.
 
