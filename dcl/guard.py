@@ -7,9 +7,11 @@ anything other than a well-formed COMMIT into a denial.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -34,6 +36,8 @@ class Decision:
     trace_id: str | None = None
     tx_hash: str | None = None
     verify_url: str | None = None
+    event_id: str | None = None
+    request_digest: str | None = None
 
     def __post_init__(self) -> None:
         if self.verdict not in ("COMMIT", "NO_COMMIT"):
@@ -75,6 +79,64 @@ def _optional_str(value: Any) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+def canonical_json(value: Any) -> str:
+    """Compact JSON with sorted object keys and preserved Unicode.
+
+    ``None`` is not valid here. Callers that have no body use an empty
+    string instead, so a missing body does not hash as JSON ``null``.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def canonical_url(url: str) -> str:
+    """Normalize a URL for the request digest.
+
+    Scheme and host are lowercased, the fragment is dropped, and the
+    default port for the scheme is omitted. Query pairs are sorted.
+    Headers are not part of the URL.
+    """
+    parts = urllib.parse.urlsplit(url.strip())
+    if not parts.scheme or not parts.hostname:
+        return url.strip()
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    if port and not (
+        (parts.scheme.lower() == "http" and port == 80)
+        or (parts.scheme.lower() == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    if parts.username is not None:
+        auth = parts.username
+        if parts.password is not None:
+            auth = f"{auth}:{parts.password}"
+        host = f"{auth}@{host}"
+    path = parts.path or "/"
+    query_pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    query_pairs.sort()
+    query = urllib.parse.urlencode(query_pairs)
+    return urllib.parse.urlunsplit((parts.scheme.lower(), host, path, query, ""))
+
+
+def request_digest(method: str, url: str, body: Any = None) -> str:
+    """SHA-256 of the protected HTTP intent.
+
+    The preimage is ``METHOD\\ncanonical URL\\ncanonical JSON``. A missing
+    body is an empty line, not JSON ``null``. HTTP headers are omitted:
+    they carry transport and payment material, including x402 headers that
+    must never become part of the authorized target request. This digest
+    is not the Oracle audit-chain ``input_hash``.
+    """
+    if not isinstance(method, str) or not method.strip():
+        raise ValueError("method is required")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("url is required")
+    canonical_body = "" if body is None else canonical_json(body)
+    material = f"{method.strip().upper()}\n{canonical_url(url)}\n{canonical_body}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _describe_action(action: str, target: str, payload: Any) -> str:
@@ -131,7 +193,12 @@ def _urllib_transport(url: str, body: Mapping[str, Any], timeout: float) -> Orac
         raise ConnectionError("oracle unavailable") from exc
 
 
-def _decision_from_http(status: int, body: bytes | str) -> Decision:
+def _decision_from_http(
+    status: int,
+    body: bytes | str,
+    *,
+    expected_digest: str | None,
+) -> Decision:
     # A payment challenge must never be parsed as an allow, even if the
     # body contains a COMMIT verdict.
     if status == 402:
@@ -160,13 +227,33 @@ def _decision_from_http(status: int, body: bytes | str) -> Decision:
         return _deny("malformed oracle response")
 
     # trace_id and tx_hash are different fields. Do not copy one into the other.
+    # request_digest is the HTTP intent digest, not input_hash.
+    trace_id = _optional_str(data.get("trace_id"))
+    tx_hash = _optional_str(data.get("tx_hash"))
+    verify_url = _optional_str(data.get("verify_url"))
+    event_id = _optional_str(data.get("event_id"))
+    returned_digest = _optional_str(data.get("request_digest"))
+    if verdict == "COMMIT" and expected_digest is not None and returned_digest != expected_digest:
+        reason = "request digest missing" if returned_digest is None else "request digest mismatch"
+        return Decision(
+            allowed=False,
+            verdict="NO_COMMIT",
+            reason=reason,
+            trace_id=trace_id,
+            tx_hash=tx_hash,
+            verify_url=verify_url,
+            event_id=event_id,
+            request_digest=returned_digest,
+        )
     return Decision(
         allowed=verdict == "COMMIT",
         verdict=verdict,
         reason=reason,
-        trace_id=_optional_str(data.get("trace_id")),
-        tx_hash=_optional_str(data.get("tx_hash")),
-        verify_url=_optional_str(data.get("verify_url")),
+        trace_id=trace_id,
+        tx_hash=tx_hash,
+        verify_url=verify_url,
+        event_id=event_id,
+        request_digest=returned_digest,
     )
 
 
@@ -263,6 +350,7 @@ class DCLGuard:
 
         try:
             described = _describe_action(action, target, payload)
+            digest = request_digest(action, target, payload)
         except (TypeError, ValueError):
             return _deny("action payload is not JSON-serializable")
 
@@ -270,6 +358,7 @@ class DCLGuard:
             "response": described,
             "agent_id": agent_id or self.agent_id,
             "task_type": "http_side_effect",
+            "request_digest": digest,
         }
         wait = self.timeout if timeout is None else float(timeout)
         url = f"{self.oracle_url}/evaluate/{selected}"
@@ -286,7 +375,7 @@ class DCLGuard:
             return _deny("malformed oracle response")
         if not isinstance(body, (bytes, str)):
             return _deny("malformed oracle response")
-        return _decision_from_http(status, body)
+        return _decision_from_http(status, body, expected_digest=digest)
 
     def post(
         self,
@@ -296,17 +385,47 @@ class DCLGuard:
         headers: Mapping[str, str] | None = None,
         timeout: float | None = None,
     ) -> SideEffectResult:
-        """POST ``json`` to ``url`` only after DCL returns COMMIT.
+        """POST ``json`` to ``url`` only after DCL returns COMMIT for this request.
 
-        On any denial the target receives no request.
+        The guard hashes the method, canonical URL, and canonical JSON body,
+        sends that ``request_digest`` to the Oracle, and opens the target
+        only when the verdict is COMMIT and the returned digest is identical.
+        A missing or different digest, or any non-COMMIT outcome, leaves the
+        target untouched.
         """
+        try:
+            expected = request_digest("POST", url, json)
+        except (TypeError, ValueError):
+            return SideEffectResult(
+                decision=_deny("action payload is not JSON-serializable"),
+                executed=False,
+            )
         decision = self.check(
             action="POST",
             target=url,
             payload=json,
             timeout=timeout,
         )
-        if decision.verdict != "COMMIT" or not decision.allowed:
+        if (
+            decision.verdict != "COMMIT"
+            or not decision.allowed
+            or decision.request_digest != expected
+        ):
+            if decision.verdict == "COMMIT" and decision.request_digest != expected:
+                decision = Decision(
+                    allowed=False,
+                    verdict="NO_COMMIT",
+                    reason=(
+                        "request digest missing"
+                        if decision.request_digest is None
+                        else "request digest mismatch"
+                    ),
+                    trace_id=decision.trace_id,
+                    tx_hash=decision.tx_hash,
+                    verify_url=decision.verify_url,
+                    event_id=decision.event_id,
+                    request_digest=decision.request_digest,
+                )
             return SideEffectResult(decision=decision, executed=False)
 
         wait = self.timeout if timeout is None else float(timeout)

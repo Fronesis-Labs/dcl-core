@@ -85,8 +85,12 @@ def build_proof_record(
         oracle["trace_id"] = decision.trace_id
     if decision.tx_hash:
         oracle["tx_hash"] = decision.tx_hash
-    if observation is not None and observation.event_id:
+    if decision.event_id:
+        oracle["event_id"] = decision.event_id
+    elif observation is not None and observation.event_id:
         oracle["event_id"] = observation.event_id
+    if decision.request_digest:
+        oracle["request_digest"] = decision.request_digest
 
     target: dict[str, object] = {
         "url": target_url,

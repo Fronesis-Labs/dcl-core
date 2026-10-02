@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { describe, it, afterEach } from "node:test";
 
-import { DCLGuard, LocalSandbox } from "../src/index.ts";
+import { DCLGuard, LocalSandbox, requestDigest } from "../src/index.ts";
 
 interface Hit {
   path: string;
@@ -69,13 +69,26 @@ async function startOracle(
     }
     let status = 200;
     let payload = "";
-    if (mode === "commit") {
-      payload = JSON.stringify({
+    if (mode === "commit" || mode === "commit-omit-digest" || mode === "commit-bad-digest") {
+      const commit: Record<string, unknown> = {
         verdict: "COMMIT",
         reason: "All policy checks passed",
         tx_hash: "0xabc",
         verify_url: "https://example.test/verify/abc",
-      });
+      };
+      if (mode === "commit") {
+        try {
+          const incoming = JSON.parse(body) as { request_digest?: unknown };
+          if (typeof incoming.request_digest === "string" && incoming.request_digest) {
+            commit.request_digest = incoming.request_digest;
+          }
+        } catch {
+          // Leave the digest off. The guard must then fail closed.
+        }
+      } else if (mode === "commit-bad-digest") {
+        commit.request_digest = "0".repeat(64);
+      }
+      payload = JSON.stringify(commit);
     } else if (mode === "block") {
       payload = JSON.stringify({
         verdict: "NO_COMMIT",
@@ -198,7 +211,8 @@ describe("DCLGuard side effects", () => {
     assert.equal(effect.hits.length, 2);
 
     const sent = JSON.parse(oracle.hits[0].body) as Record<string, string>;
-    assert.deepEqual(Object.keys(sent).sort(), ["agent_id", "response", "task_type"]);
+    assert.deepEqual(Object.keys(sent).sort(), ["agent_id", "request_digest", "response", "task_type"]);
+    assert.equal(sent.request_digest, await requestDigest("POST", effect.url, payload));
     assert.match(sent.response, /action: POST/);
     assert.match(sent.response, /"amount":42/);
     assert.equal(oracle.hits[0].path, "/evaluate/fast");
@@ -331,8 +345,12 @@ describe("DCLGuard side effects", () => {
       },
     ];
     for (const sample of samples) {
-      const oracle = await startOracle("raw", { body: JSON.stringify(sample.body) });
       const effect = await startEffect();
+      const body = { ...sample.body };
+      if (sample.allowed) {
+        body.request_digest = await requestDigest("POST", effect.url, { amount: 1 });
+      }
+      const oracle = await startOracle("raw", { body: JSON.stringify(body) });
       closers.push(oracle.close, effect.close);
       const guard = new DCLGuard({ oracleUrl: oracle.url });
       const result = await guard.post(effect.url, { json: { amount: 1 } });
@@ -438,10 +456,16 @@ describe("DCLGuard side effects", () => {
   });
 
   it("an allowed flag cannot disagree with verdict", async () => {
-    const oracle = await startOracle("raw", {
-      body: JSON.stringify({ verdict: "COMMIT", reason: "yes", allowed: false, confidence: 0 }),
-    });
     const effect = await startEffect();
+    const oracle = await startOracle("raw", {
+      body: JSON.stringify({
+        verdict: "COMMIT",
+        reason: "yes",
+        allowed: false,
+        confidence: 0,
+        request_digest: await requestDigest("POST", effect.url, { amount: 3 }),
+      }),
+    });
     closers.push(oracle.close, effect.close);
     const guard = new DCLGuard({ oracleUrl: oracle.url });
     const result = await guard.post(effect.url, { json: { amount: 3 } });
@@ -515,11 +539,12 @@ describe("DCLGuard side effects", () => {
     const calls: string[] = [];
     const guard = new DCLGuard({
       oracleUrl: "http://oracle.test",
-      transport: async (url) => {
+      transport: async (url, body) => {
         calls.push(url);
         if (url.includes(effect.url)) {
           await developerFetch(effect.url, { via: "transport" });
         }
+        const digest = typeof body.request_digest === "string" ? body.request_digest : undefined;
         return {
           status: 200,
           body: JSON.stringify({
@@ -527,6 +552,7 @@ describe("DCLGuard side effects", () => {
             reason: "All policy checks passed",
             tx_hash: "0xabc",
             verify_url: "https://example.test/verify/abc",
+            ...(digest ? { request_digest: digest } : {}),
           }),
         };
       },
@@ -562,5 +588,44 @@ describe("DCLGuard side effects", () => {
     assert.equal(blocked.executed, false);
     assert.equal(effect.hits.length, 1);
     assert.deepEqual(JSON.parse(effect.hits[0].body), { amount: 42 });
+  });
+
+  it("digest is stable across JSON key order", async () => {
+    const url = "https://API.Example.com:443/orders?b=2&a=1#fragment";
+    const left = await requestDigest("post", url, { z: 1, a: "é" });
+    const right = await requestDigest("POST", url, { a: "é", z: 1 });
+    assert.equal(left, right);
+    assert.equal(left.length, 64);
+    assert.notEqual(left, await requestDigest("PUT", url, { a: "é", z: 1 }));
+    assert.notEqual(left, await requestDigest("POST", "https://api.example.com/orders?a=1&b=3", { a: "é", z: 1 }));
+    assert.notEqual(left, await requestDigest("POST", url, { a: "é", z: 2 }));
+    assert.notEqual(left, await requestDigest("POST", url));
+  });
+
+  it("COMMIT with a different request digest does not call the target", async () => {
+    const oracle = await startOracle("commit-bad-digest");
+    const effect = await startEffect();
+    closers.push(oracle.close, effect.close);
+    const guard = new DCLGuard({ oracleUrl: oracle.url });
+    const result = await guard.post(effect.url, { json: { amount: 42 } });
+    assert.equal(oracle.hits.length, 1);
+    assert.equal(effect.hits.length, 0);
+    assert.equal(result.executed, false);
+    assert.equal(result.decision.verdict, "NO_COMMIT");
+    assert.equal(result.decision.reason, "request digest mismatch");
+    assert.equal(result.decision.requestDigest, "0".repeat(64));
+  });
+
+  it("COMMIT without a request digest does not call the target", async () => {
+    const oracle = await startOracle("commit-omit-digest");
+    const effect = await startEffect();
+    closers.push(oracle.close, effect.close);
+    const guard = new DCLGuard({ oracleUrl: oracle.url });
+    const result = await guard.post(effect.url, { json: { amount: 42 } });
+    assert.equal(oracle.hits.length, 1);
+    assert.equal(effect.hits.length, 0);
+    assert.equal(result.executed, false);
+    assert.equal(result.decision.reason, "request digest missing");
+    assert.equal(result.decision.requestDigest, null);
   });
 });

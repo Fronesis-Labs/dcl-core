@@ -1,4 +1,4 @@
-export { DCLGuard, describeAction } from "./guard.ts";
+export { DCLGuard, describeAction, requestDigest } from "./guard.ts";
 export type {
   CheckInput,
   DCLGuardOptions,

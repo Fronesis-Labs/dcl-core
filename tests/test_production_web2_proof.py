@@ -446,15 +446,23 @@ class OracleTransportTests(unittest.TestCase):
 
         def respond(path, raw, headers):  # type: ignore[no-untyped-def]
             if headers.get("X-PAYMENT"):
-                body = json.dumps(
-                    {
-                        "verdict": "COMMIT",
-                        "reason": "ok",
-                        "trace_id": "trace-live",
-                        "tx_hash": audit_tx,
-                        "event_id": "event-live",
-                    }
-                ).encode("utf-8")
+                echoed = None
+                try:
+                    incoming = json.loads(raw.decode("utf-8"))
+                    if isinstance(incoming, dict) and isinstance(incoming.get("request_digest"), str):
+                        echoed = incoming["request_digest"]
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    echoed = None
+                payload = {
+                    "verdict": "COMMIT",
+                    "reason": "ok",
+                    "trace_id": "trace-live",
+                    "tx_hash": audit_tx,
+                    "event_id": "event-live",
+                }
+                if echoed:
+                    payload["request_digest"] = echoed
+                body = json.dumps(payload).encode("utf-8")
                 return 200, body, {"Content-Type": "application/json", "X-PAYMENT-RESPONSE": settle}
             return 402, _challenge("10000"), {"Content-Type": "application/json"}
 
@@ -509,6 +517,42 @@ class OracleTransportTests(unittest.TestCase):
         )
         self.assertTrue(record["enforcement"]["target_called_after_commit"])
         self.assertIs(transport.observation, observation)
+
+    def test_negative_record_requires_a_live_policy_denial(self) -> None:
+        import importlib
+
+        negative = importlib.import_module("production_web2_negative_proof")
+        denied = Decision(False, "NO_COMMIT", "forbidden: 'jailbreak'")
+        result = SideEffectResult(decision=denied, executed=False)
+        observation = self.adapter.OracleTransportObservation()
+        observation.final_status = 200
+        observation.initial_status = 200
+        record = negative.build_negative_record(
+            oracle_url="https://webhook.fronesislabs.com",
+            target_url="https://httpbin.org/post",
+            result=result,
+            timestamp="2026-10-02T00:00:00Z",
+            observation=observation,
+            sent_digest="abc",
+        )
+        self.assertTrue(record["complete"])
+        self.assertEqual(record["oracle"]["verdict"], "NO_COMMIT")
+        self.assertFalse(record["target"]["called"])
+
+        challenge = Decision(False, "NO_COMMIT", "payment required and could not be completed")
+        observation.final_status = 402
+        record = negative.build_negative_record(
+            oracle_url="https://webhook.fronesislabs.com",
+            target_url="https://httpbin.org/post",
+            result=SideEffectResult(decision=challenge, executed=False),
+            timestamp="2026-10-02T00:00:00Z",
+            observation=observation,
+            sent_digest="abc",
+        )
+        self.assertFalse(record["complete"])
+        self.assertNotIn("verdict", record["oracle"])
+        self.assertEqual(record["oracle"]["http_status"], 402)
+        self.assertFalse(record["target"]["called"])
 
 
 if __name__ == "__main__":

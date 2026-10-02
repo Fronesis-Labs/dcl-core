@@ -101,6 +101,7 @@ class LocalSandbox:
         self.close()
 
     def _decide(self, raw: bytes) -> dict[str, object]:
+        incoming: object = None
         try:
             incoming = json.loads(raw.decode("utf-8"))
             response_text = incoming.get("response", "") if isinstance(incoming, dict) else ""
@@ -109,6 +110,11 @@ class LocalSandbox:
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             response_text = ""
 
+        echoed = None
+        if isinstance(incoming, dict):
+            candidate = incoming.get("request_digest")
+            if isinstance(candidate, str) and candidate:
+                echoed = candidate
         matched = next((item for item in self.block_if_contains if item in response_text), None)
         if matched is not None:
             verdict = "NO_COMMIT"
@@ -123,7 +129,7 @@ class LocalSandbox:
             self._counter += 1
             index = self._counter
 
-        return {
+        body: dict[str, object] = {
             "verdict": verdict,
             "confidence": confidence,
             "reason": reason,
@@ -138,3 +144,6 @@ class LocalSandbox:
             "seal_text": "",
             "verify_url": "",
         }
+        if echoed is not None:
+            body["request_digest"] = echoed
+        return body
