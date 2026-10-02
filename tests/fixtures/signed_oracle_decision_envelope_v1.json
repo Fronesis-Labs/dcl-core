@@ -1,0 +1,28 @@
+{
+  "description": "Signed Oracle decision envelope v1 test vector. The private key is a test fixture only and is not a production trust anchor.",
+  "test_key_label": "dcl-core signed oracle decision envelope v1 TEST KEY ONLY",
+  "private_seed_hex": "8e9dd37ff470a8a5448e1dbe8143066d3f5f0c6090a6bd982b016473898d570b",
+  "public_key_hex": "11dee386caeaa68cb3c77e5ea1aa0e99cd1054818e819d94068e02b379cbb6f9",
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEd7jhsrqpoyzx35eoaoOmc0QVIGOgZ2UBo4Cs3nLtvk=\n-----END PUBLIC KEY-----\n",
+  "canonical_payload": "{\"expires_at\":\"2026-10-02T00:01:00Z\",\"issued_at\":\"2026-10-02T00:00:00Z\",\"key_id\":\"oracle-2026-01\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"policy_id\":\"default\",\"policy_version\":\"1\",\"request_digest\":\"102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123\",\"schema_version\":\"1\",\"trace_id\":\"tr_test_vector_v1\",\"verdict\":\"COMMIT\"}",
+  "canonical_sha256": "b4228c3e61e5c850b3213f3bab6acf78fd5e6729928d474027d9e0af283184f0",
+  "signature_base64": "H7e0gIhzXyMApYBHonFILLghvEURPdt9Z4b1j5cA4fT1ZRdNxA6gKhc42YReQRMX2N/8lutmTw745woDWeACAw==",
+  "verification_result": true,
+  "envelope": {
+    "schema_version": "1",
+    "key_id": "oracle-2026-01",
+    "trace_id": "tr_test_vector_v1",
+    "request_digest": "102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123",
+    "verdict": "COMMIT",
+    "policy_id": "default",
+    "policy_version": "1",
+    "issued_at": "2026-10-02T00:00:00Z",
+    "expires_at": "2026-10-02T00:01:00Z",
+    "nonce": "00112233445566778899aabbccddeeff"
+  },
+  "signature": {
+    "algorithm": "Ed25519",
+    "key_id": "oracle-2026-01",
+    "value": "H7e0gIhzXyMApYBHonFILLghvEURPdt9Z4b1j5cA4fT1ZRdNxA6gKhc42YReQRMX2N/8lutmTw745woDWeACAw=="
+  }
+}
