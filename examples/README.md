@@ -1,6 +1,12 @@
 # Production Web2 proof
 
-One ordinary POST, gated by the existing `DCLGuard` API. The Oracle call may settle x402. The protected target stays a normal unpaid HTTPS request.
+One ordinary POST, gated by the existing `DCLGuard` API. x402 settlement is performed by `examples/oracle_x402_transport.py`, which is not part of `DCLGuard`. The protected target stays a normal unpaid HTTPS request.
+
+The recorded evidence was produced from commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e` on 2026-10-02. Do not start a new paid run unless you intend to spend USDC. The positive file is [production_web2_proof.json](production_web2_proof.json) (`2026-10-02T06:45:16Z`, digest `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019`). The negative file is [production_web2_negative_proof.json](production_web2_negative_proof.json) (`2026-10-02T06:46:17Z`, digest `bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e`).
+
+`oracle.tx_hash` is the DCL audit-chain identifier returned by the Oracle (`0x` plus SHA-256 of the canonical chain record). It is not the Base payment transaction. `payment.tx_hash` in the positive file is that payment transaction: `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`. The JSON does not include the fields `verify_chain()` requires, so it is not an offline chain proof and it does not authenticate the Oracle response.
+
+`target.called: false` on the negative proof means this process did not execute the target POST. httpbin does not supply a separate counter. Another client could still have called httpbin.
 
 ```
 production_web2_proof
@@ -44,7 +50,9 @@ That installs `x402[requests,evm]>=2.25.0`, the same payment client family the D
   - `X402_PRIVATE_KEY`
   - `PRIVATE_KEY`
 
-The script never prints that value. Do not commit it.
+The script never prints that value. Do not commit it. Do not commit a seed phrase. Use a dedicated wallet for this payment, keep only a small operational balance, and do not use a treasury or personal wallet. Rotate a credential that has been exposed.
+
+No API key is required. The Oracle call is the x402 payment above. The target call is unpaid.
 
 ## Payment cap
 
@@ -91,7 +99,7 @@ A completed proof looks like this, with values taken from the live responses. Fi
 - `oracle.initial_status` is 402 and `oracle.payment_required` is true.
 - `oracle.final_status` is 200 and `oracle.verdict` is `COMMIT`.
 - `oracle.trace_id` is present only when the Oracle JSON included `trace_id`. It is never copied from `tx_hash` or from the payment transaction.
-- `oracle.tx_hash` is the Oracle audit field when the Oracle included it. `payment.tx_hash` is present only when the x402 client returned a settlement transaction. They are different fields.
+- `oracle.tx_hash` is the DCL audit-chain hash the Oracle included (`ChainState.append` returns `0x` plus SHA-256 of the canonical record). It is not a Base transaction hash. `payment.tx_hash` is present only when the x402 client returned a settlement transaction. They are different fields.
 - `oracle.event_id` is present only when the Oracle JSON included `event_id`.
 - `target.http_status` is the status of the POST the guard sent, and only when the verdict was `COMMIT`.
 - `enforcement.sequence` records `oracle_402`, then `payment`, then `oracle_final`, then `target` only if the guard executed the POST.
@@ -127,4 +135,4 @@ python3 examples/production_web2_negative_proof.py
 
 `complete` is true only when the Oracle HTTP status is 200, the verdict is a real `NO_COMMIT`, and `target.called` is false. HTTP 402 is recorded as a payment challenge and is not treated as that verdict. The script does not write a local `NO_COMMIT` in place of the Oracle response.
 
-The completed live negative run is [production_web2_negative_proof.json](production_web2_negative_proof.json): Oracle 402, x402 payment, `NO_COMMIT`, target not called.
+The completed live negative run is [production_web2_negative_proof.json](production_web2_negative_proof.json): Oracle 402, x402 payment, `NO_COMMIT`, `target.called` false. That flag is this client's observation that `DCLGuard` did not call the target. It is not an independent httpbin audit.

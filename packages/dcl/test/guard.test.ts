@@ -628,4 +628,81 @@ describe("DCLGuard side effects", () => {
     assert.equal(result.decision.reason, "request digest missing");
     assert.equal(result.decision.requestDigest, null);
   });
+
+  it("known digest vector matches sha256 of the canonical preimage", async () => {
+    const preimage = 'POST\nhttps://api.example.com/orders?a=1&b=2\n{"a":"é","z":1}';
+    const expected = "102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123";
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(preimage));
+    const actual = [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    assert.equal(actual, expected);
+    const url = "https://API.Example.com:443/orders?b=2&a=1#fragment";
+    assert.equal(await requestDigest("post", url, { z: 1, a: "é" }), expected);
+    assert.equal(await requestDigest(" post ", url, { a: "é", z: 1 }), expected);
+  });
+
+  it("only the exact verdict COMMIT is allowed", async () => {
+    const effect = await startEffect();
+    closers.push(effect.close);
+    const samples: Array<[string | null, boolean]> = [
+      ["COMMIT", true],
+      ["NO_COMMIT", false],
+      ["COMMITTED", false],
+      ["COMMIT ", false],
+      ["commit", false],
+      [null, false],
+      ["YES", false],
+    ];
+    for (const [verdict, allowed] of samples) {
+      const body: Record<string, unknown> = { reason: "ok" };
+      if (verdict !== null) {
+        body.verdict = verdict;
+      }
+      if (allowed) {
+        body.request_digest = await requestDigest("POST", effect.url, { n: 1 });
+      }
+      const oracle = await startOracle("raw", { body: JSON.stringify(body) });
+      closers.push(oracle.close);
+      const result = await new DCLGuard({ oracleUrl: oracle.url, timeoutMs: 1000 }).post(effect.url, {
+        json: { n: 1 },
+      });
+      assert.equal(result.decision.allowed, allowed, String(verdict));
+      assert.equal(result.executed, allowed, String(verdict));
+      assert.equal(result.decision.verdict, allowed ? "COMMIT" : "NO_COMMIT");
+      effect.hits.length = 0;
+    }
+  });
+
+  it("target redirect is not followed", async () => {
+    const sinkHits: string[] = [];
+    const sink = await listen(async (req, res) => {
+      sinkHits.push(await readBody(req));
+      res.writeHead(200, { "Content-Length": "0" });
+      res.end();
+    });
+    closers.push(sink.close);
+    const originHits: string[] = [];
+    const origin = await listen(async (req, res) => {
+      originHits.push(await readBody(req));
+      res.writeHead(302, { Location: `${sink.url}/elsewhere`, "Content-Length": "0" });
+      res.end();
+    });
+    closers.push(origin.close);
+    const target = `${origin.url}/orders`;
+    const oracle = await startOracle("raw", {
+      body: JSON.stringify({
+        verdict: "COMMIT",
+        reason: "ok",
+        request_digest: await requestDigest("POST", target, { n: 1 }),
+      }),
+    });
+    closers.push(oracle.close);
+    const result = await new DCLGuard({ oracleUrl: oracle.url, timeoutMs: 1000 }).post(target, {
+      json: { n: 1 },
+    });
+    assert.deepEqual(originHits, [JSON.stringify({ n: 1 })]);
+    assert.deepEqual(sinkHits, []);
+    assert.equal(result.executed, false);
+    assert.equal(result.decision.verdict, "NO_COMMIT");
+    assert.equal(result.decision.reason, "target redirect refused");
+  });
 });

@@ -7,6 +7,7 @@ the boolean alone.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -598,6 +599,57 @@ class RequestDigestTests(unittest.TestCase):
             oracle.close()
             effect.close()
 
+    def test_known_vector_matches_sha256_of_the_canonical_preimage(self) -> None:
+        method = "POST"
+        url = "https://API.Example.com:443/orders?b=2&a=1#fragment"
+        body = {"z": 1, "a": "é"}
+        preimage = 'POST\nhttps://api.example.com/orders?a=1&b=2\n{"a":"é","z":1}'
+        expected = "102854ec6909e5be3774fffbfc7bee1922341a2dede88277f7e30f12bc3a8123"
+        self.assertEqual(hashlib.sha256(preimage.encode("utf-8")).hexdigest(), expected)
+        self.assertEqual(request_digest(method, url, body), expected)
+        self.assertEqual(request_digest(" post ", url, {"a": "é", "z": 1}), expected)
+
+    def test_missing_body_hashes_an_empty_line_not_json_null(self) -> None:
+        preimage = "POST\nhttps://api.example.com/orders\n"
+        expected = hashlib.sha256(preimage.encode("utf-8")).hexdigest()
+        self.assertEqual(request_digest("POST", "https://api.example.com/orders", None), expected)
+        null_preimage = 'POST\nhttps://api.example.com/orders\nnull'
+        self.assertNotEqual(expected, hashlib.sha256(null_preimage.encode("utf-8")).hexdigest())
+
+    def test_url_canonicalization_matches_the_implementation(self) -> None:
+        from dcl.guard import canonical_json, canonical_url
+
+        self.assertEqual(
+            canonical_url("  https://API.Example.com:443/orders?b=2&a=1#fragment  "),
+            "https://api.example.com/orders?a=1&b=2",
+        )
+        self.assertEqual(canonical_url("https://api.example.com:8443/v"), "https://api.example.com:8443/v")
+        self.assertEqual(canonical_url("https://api.example.com"), "https://api.example.com/")
+        self.assertEqual(canonical_json({"b": 1, "a": "é"}), '{"a":"é","b":1}')
+        self.assertIn("not RFC 8785", canonical_json.__doc__)
+
+    def test_headers_are_not_part_of_the_digest(self) -> None:
+        effect = EffectServer()
+        payload = {"amount": 1}
+        digest = request_digest("POST", effect.url, payload)
+        try:
+            for headers in ({"Authorization": "Bearer secret-a"}, {"X-Request-Id": "other"}):
+                oracle = ScriptedOracle("commit")
+                try:
+                    result = DCLGuard(oracle.url, timeout=1).post(
+                        effect.url, json=payload, headers=headers
+                    )
+                    sent = json.loads(oracle.hits[0]["body"])  # type: ignore[arg-type]
+                    self.assertEqual(sent["request_digest"], digest)
+                    self.assertNotIn(b"Bearer", oracle.hits[0]["body"])  # type: ignore[operator]
+                    self.assertNotIn(b"secret-a", oracle.hits[0]["body"])  # type: ignore[operator]
+                    self.assertTrue(result.executed)
+                finally:
+                    oracle.close()
+                    effect.hits.clear()
+        finally:
+            effect.close()
+
     def test_missing_digest_does_not_call_the_target(self) -> None:
         oracle = ScriptedOracle("commit-omit-digest")
         effect = EffectServer()
@@ -636,6 +688,164 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(json.loads(effect.hits[0]["body"]), {"amount": 42})  # type: ignore[arg-type]
         finally:
             effect.close()
+
+
+class StrictVerdictTests(unittest.TestCase):
+    def test_only_exact_commit_is_allowed(self) -> None:
+        effect = EffectServer()
+        samples = [
+            ("COMMIT", True),
+            ("NO_COMMIT", False),
+            ("COMMITTED", False),
+            ("COMMIT ", False),
+            ("commit", False),
+            (None, False),
+            ("YES", False),
+        ]
+        try:
+            for verdict, allowed in samples:
+                with self.subTest(verdict=verdict):
+                    body: dict[str, object] = {"reason": "ok"}
+                    if verdict is not None:
+                        body["verdict"] = verdict
+                    if allowed:
+                        body["request_digest"] = request_digest("POST", effect.url, {"n": 1})
+                    oracle = ScriptedOracle("raw", body=json.dumps(body).encode())
+                    try:
+                        result = DCLGuard(oracle.url, timeout=1).post(effect.url, json={"n": 1})
+                        self.assertEqual(result.decision.allowed, allowed)
+                        self.assertEqual(result.executed, allowed)
+                        self.assertEqual(result.decision.verdict, "COMMIT" if allowed else "NO_COMMIT")
+                        self.assertEqual(len(effect.hits), 1 if allowed else 0)
+                    finally:
+                        oracle.close()
+                        effect.hits.clear()
+        finally:
+            effect.close()
+
+
+class TargetRedirectTests(unittest.TestCase):
+    def test_target_redirect_is_not_followed(self) -> None:
+        sink_hits: list[bytes] = []
+
+        class Sink(BaseHTTPRequestHandler):
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                sink_hits.append(self.rfile.read(length) if length else b"")
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        sink = _ThreadingServer(("127.0.0.1", 0), Sink)
+        sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+        sink_thread.start()
+        sink_host, sink_port = sink.server_address[:2]
+        location = f"http://{sink_host}:{sink_port}/elsewhere"
+        origin_hits: list[bytes] = []
+
+        class Origin(BaseHTTPRequestHandler):
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                origin_hits.append(self.rfile.read(length) if length else b"")
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        origin = _ThreadingServer(("127.0.0.1", 0), Origin)
+        origin_thread = threading.Thread(target=origin.serve_forever, daemon=True)
+        origin_thread.start()
+        origin_host, origin_port = origin.server_address[:2]
+        target = f"http://{origin_host}:{origin_port}/orders"
+        oracle = ScriptedOracle(
+            "raw",
+            body=json.dumps(
+                {
+                    "verdict": "COMMIT",
+                    "reason": "ok",
+                    "request_digest": request_digest("POST", target, {"n": 1}),
+                }
+            ).encode(),
+        )
+        try:
+            result = DCLGuard(oracle.url, timeout=1).post(target, json={"n": 1})
+            self.assertEqual(origin_hits, [json.dumps({"n": 1}, ensure_ascii=False).encode()])
+            self.assertEqual(sink_hits, [])
+            self.assertFalse(result.executed)
+            self.assertEqual(result.decision.verdict, "NO_COMMIT")
+            self.assertEqual(result.decision.reason, "target redirect refused")
+            self.assertFalse(result.decision.allowed)
+        finally:
+            oracle.close()
+            origin.shutdown()
+            origin.server_close()
+            sink.shutdown()
+            sink.server_close()
+
+
+class HttpStatusTests(unittest.TestCase):
+    def test_http_404_does_not_call_the_target(self) -> None:
+        effect = EffectServer()
+        oracle = ScriptedOracle("raw", status=404, body=b'{"error":"missing"}')
+        try:
+            result = DCLGuard(oracle.url, timeout=1).post(effect.url, json={"n": 1})
+            self.assertFalse(result.executed)
+            self.assertEqual(effect.hits, [])
+            self.assertIn("HTTP 404", result.decision.reason)
+            self.assertEqual(result.decision.verdict, "NO_COMMIT")
+        finally:
+            oracle.close()
+            effect.close()
+
+    def test_empty_digest_is_treated_as_missing(self) -> None:
+        effect = EffectServer()
+        oracle = ScriptedOracle(
+            "raw",
+            body=b'{"verdict":"COMMIT","reason":"ok","request_digest":""}',
+        )
+        try:
+            result = DCLGuard(oracle.url, timeout=1).post(effect.url, json={"n": 1})
+            self.assertFalse(result.executed)
+            self.assertEqual(effect.hits, [])
+            self.assertEqual(result.decision.reason, "request digest missing")
+        finally:
+            oracle.close()
+            effect.close()
+
+    def test_non_matching_digest_string_is_a_mismatch(self) -> None:
+        effect = EffectServer()
+        oracle = ScriptedOracle(
+            "raw",
+            body=b'{"verdict":"COMMIT","reason":"ok","request_digest":"not-a-digest"}',
+        )
+        try:
+            result = DCLGuard(oracle.url, timeout=1).post(effect.url, json={"n": 1})
+            self.assertFalse(result.executed)
+            self.assertEqual(result.decision.reason, "request digest mismatch")
+            self.assertEqual(result.decision.request_digest, "not-a-digest")
+        finally:
+            oracle.close()
+            effect.close()
+
+
+class ImportTests(unittest.TestCase):
+    def test_documented_public_imports(self) -> None:
+        from dcl import DCLGuard as Guard
+        from dcl.guard import canonical_json, canonical_url, request_digest as digest
+        from dcl_core import ChainState, verify_chain
+
+        self.assertIs(Guard, DCLGuard)
+        self.assertTrue(callable(canonical_json))
+        self.assertTrue(callable(canonical_url))
+        self.assertTrue(callable(digest))
+        self.assertTrue(callable(ChainState))
+        self.assertTrue(callable(verify_chain))
 
 
 class DecisionInvariantTests(unittest.TestCase):
