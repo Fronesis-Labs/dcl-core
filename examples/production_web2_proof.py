@@ -26,6 +26,7 @@ for _path in (_ROOT, _EXAMPLES):
 from dcl import DCLGuard, SideEffectResult
 from oracle_x402_transport import (
     InvalidPaymentCap,
+    MISSING_PAYER_KEY_MESSAGE,
     OracleTransportObservation,
     build_oracle_only_transport,
     payment_credentials_configured,
@@ -39,7 +40,7 @@ PAYLOAD = {
     "action": "post_json",
     "note": "harmless DCL Web2 production proof",
 }
-_CREDENTIALS_MESSAGE = "production proof unavailable: payment credentials not configured"
+_CREDENTIALS_MESSAGE = "production proof unavailable: " + MISSING_PAYER_KEY_MESSAGE
 
 
 def resolve_oracle_url(environ: Mapping[str, str]) -> str:
@@ -137,11 +138,11 @@ def credentials_missing_record(
     return {
         "proof": "dcl-web2-production",
         "complete": False,
-        "stage": "payment credentials not configured",
+        "stage": MISSING_PAYER_KEY_MESSAGE,
         "oracle": {
             "url": oracle_url,
             "verdict": "NO_COMMIT",
-            "reason": "payment credentials not configured",
+            "reason": MISSING_PAYER_KEY_MESSAGE,
         },
         "target": {
             "url": target_url,

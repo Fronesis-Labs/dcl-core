@@ -174,17 +174,26 @@ class ExampleCredentialTests(unittest.TestCase):
         self.assertFalse(self.mod.payment_credentials_configured({}))
         self.assertFalse(self.mod.payment_credentials_configured({"DCL_PAYER_PRIVATE_KEY": "  "}))
         self.assertFalse(self.mod.payment_credentials_configured({"PRIVATE_KEY": ""}))
+        self.assertFalse(self.mod.payment_credentials_configured({"PRIVATE_KEY": "other-wallet"}))
+        self.assertTrue(self.mod.payment_credentials_configured({"DCL_PAYER_PRIVATE_KEY": "configured"}))
         self.assertTrue(self.mod.payment_credentials_configured({"X402_PRIVATE_KEY": "configured"}))
+        with self.assertRaises(Exception) as caught:
+            self.mod.build_oracle_only_transport(
+                "https://webhook.fronesislabs.com/evaluate/fast",
+                {"PRIVATE_KEY": "other-wallet"},
+            )
+        self.assertIn("DCL_PAYER_PRIVATE_KEY is not set", str(caught.exception))
+        self.assertIn("PRIVATE_KEY is ignored", str(caught.exception))
 
         stdout = io.StringIO()
         code = self.mod.run({}, stdout=stdout)
         text = stdout.getvalue()
         self.assertEqual(code, 1)
         message, payload = text.split("\n", 1)
-        self.assertEqual(message, "production proof unavailable: payment credentials not configured")
+        self.assertEqual(message, "production proof unavailable: " + self.mod.MISSING_PAYER_KEY_MESSAGE)
         record = json.loads(payload)
         self.assertFalse(record["complete"])
-        self.assertEqual(record["stage"], "payment credentials not configured")
+        self.assertEqual(record["stage"], self.mod.MISSING_PAYER_KEY_MESSAGE)
         self.assertEqual(record["oracle"]["verdict"], "NO_COMMIT")
         self.assertNotIn("http_status", record["target"])
         self.assertNotIn("trace_id", record["oracle"])

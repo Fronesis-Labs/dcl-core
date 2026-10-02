@@ -4,7 +4,11 @@ One ordinary POST, gated by the existing `DCLGuard` API. x402 settlement is perf
 
 The recorded evidence was produced from commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e` on 2026-10-02. Do not start a new paid run unless you intend to spend USDC. The positive file is [production_web2_proof.json](production_web2_proof.json) (`2026-10-02T06:45:16Z`, digest `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019`). The negative file is [production_web2_negative_proof.json](production_web2_negative_proof.json) (`2026-10-02T06:46:17Z`, digest `bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e`).
 
-`oracle.tx_hash` is the DCL audit-chain identifier returned by the Oracle (`0x` plus SHA-256 of the canonical chain record). It is not the Base payment transaction. `payment.tx_hash` in the positive file is that payment transaction: `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`. The JSON does not include the fields `verify_chain()` requires, so it is not an offline chain proof and it does not authenticate the Oracle response.
+`oracle.tx_hash` is the DCL audit-chain identifier returned by the Oracle (`0x` plus SHA-256 of the canonical chain record). It is not the Base payment transaction. `payment.tx_hash` in the positive file is that payment transaction: `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`. The JSON does not include the fields `verify_chain()` requires, so it is not an offline chain proof and it does not authenticate the Oracle response. The README line "Don't trust the agent. Trust the proof." is that chain check. These JSON files only confirm the sequence this client observed.
+
+These two JSON files are the current evidence. This repository does not contain an earlier proof note. A write-up that cites commit `8b620d0` or different hashes is a previous run, not a second canonical proof. The identifier that note called an Oracle transaction reference is the audit-chain hash (`oracle.tx_hash`), not a Base transaction.
+
+The Oracle receives the action, the target, and the JSON body in the `response` field, not only the digest, because checks such as jailbreak evaluate that text. On the production Oracle that text is sent to `https://webhook.fronesislabs.com`, which is the same disclosure as publishing the decision on the public audit board.
 
 `target.called: false` on the negative proof means this process did not execute the target POST. httpbin does not supply a separate counter. Another client could still have called httpbin.
 
@@ -44,11 +48,7 @@ pip install -r examples/requirements.txt
 
 That installs `x402[requests,evm]>=2.25.0`, the same payment client family the DCL webhook uses. An equivalent extra is `pip install -e '.[proof]'`.
 - Outbound HTTPS to the Oracle origin and, after `COMMIT`, to `https://httpbin.org/post`.
-- A payer key in one of these environment variables (the first non-empty value is used):
-
-  - `DCL_PAYER_PRIVATE_KEY`
-  - `X402_PRIVATE_KEY`
-  - `PRIVATE_KEY`
+- A payer key in `DCL_PAYER_PRIVATE_KEY`. `X402_PRIVATE_KEY` is the only alias. A general `PRIVATE_KEY` is ignored, even when it is set for another wallet. If neither accepted variable is set, the script exits before any network call or signature.
 
 The script never prints that value. Do not commit it. Do not commit a seed phrase. Use a dedicated wallet for this payment, keep only a small operational balance, and do not use a treasury or personal wallet. Rotate a credential that has been exposed.
 
@@ -73,13 +73,13 @@ python examples/production_web2_proof.py
 
 `DCL_ORACLE_URL` is optional. When it is unset, the script uses `https://webhook.fronesislabs.com` and `POST /evaluate/fast`.
 
-If none of the payer variables is set, the process prints this line and does not call the Oracle or the target:
+If neither accepted payer variable is set, the process prints this line and does not call the Oracle or the target:
 
 ```text
-production proof unavailable: payment credentials not configured
+production proof unavailable: DCL_PAYER_PRIVATE_KEY is not set. The only accepted alias is X402_PRIVATE_KEY. PRIVATE_KEY is ignored.
 ```
 
-It then prints JSON with `complete: false`, `stage: "payment credentials not configured"`, verdict `NO_COMMIT`, and no target HTTP status, and exits 1.
+It then prints JSON with `complete: false`, that same sentence as `stage`, verdict `NO_COMMIT`, and no target HTTP status, and exits 1.
 
 ## What the script does
 

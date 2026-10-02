@@ -29,8 +29,17 @@ export interface Decision {
 
 export interface SideEffectResult {
   decision: Decision;
-  /** True only after COMMIT and the side-effect request was sent. */
+  /**
+   * True only when the POST returned a non-redirect response after exact
+   * COMMIT and a matching digest. False with `requestSent` true means the
+   * digested host may already have seen the request.
+   */
   executed: boolean;
+  /**
+   * True when the POST to the digested URL was sent, including a redirect
+   * the guard refused to follow.
+   */
+  requestSent: boolean;
   statusCode: number | null;
   text: string | null;
 }
@@ -320,7 +329,8 @@ export class DCLGuard {
 
   /**
    * POST `json` to `url` only after DCL returns COMMIT.
-   * On any denial the target receives no request.
+   * A denial before that POST leaves `requestSent` false.
+   * A target redirect sets `requestSent` true and `executed` false.
    */
   async post(url: string, options: PostOptions = {}): Promise<SideEffectResult> {
     let expected: string;
@@ -330,6 +340,7 @@ export class DCLGuard {
       return {
         decision: deny("action payload is not JSON-serializable"),
         executed: false,
+        requestSent: false,
         statusCode: null,
         text: null,
       };
@@ -353,7 +364,13 @@ export class DCLGuard {
           requestDigest: verdict.requestDigest,
         });
       }
-      return { decision: verdict, executed: false, statusCode: null, text: null };
+      return {
+        decision: verdict,
+        executed: false,
+        requestSent: false,
+        statusCode: null,
+        text: null,
+      };
     }
 
     const headers: Record<string, string> = { Accept: "application/json" };
@@ -385,6 +402,7 @@ export class DCLGuard {
           requestDigest: verdict.requestDigest,
         }),
         executed: false,
+        requestSent: true,
         statusCode: null,
         text: null,
       };
@@ -393,6 +411,7 @@ export class DCLGuard {
     return {
       decision: verdict,
       executed: true,
+      requestSent: true,
       statusCode: response.status,
       text,
     };

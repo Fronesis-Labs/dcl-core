@@ -17,7 +17,7 @@ A COMMIT verdict means the call may run. It does not mean the payload is a valid
 ## The flow
 
 1. Your code chooses an action, a target, and a payload.
-2. `DCLGuard` POSTs that description to `{oracle_url}/evaluate/{tier}` (`fast` by default).
+2. `DCLGuard` POSTs that description to `{oracle_url}/evaluate/{tier}` (`fast` by default). The Oracle receives the action, the target, and the JSON body in the `response` field, not only the digest, because checks such as jailbreak evaluate that text. On the production Oracle that text is sent to `https://webhook.fronesislabs.com`, which is the same disclosure as publishing the decision on the public audit board.
 3. The Oracle answers with a verdict.
 4. The only permission is HTTP 200, `verdict` exactly `COMMIT`, a string `reason`, and a `request_digest` that matches the request the guard is about to send.
 5. `guard.post` then makes a separate HTTP POST to the target. That call does not go through the Oracle transport.
@@ -28,7 +28,7 @@ A COMMIT verdict means the call may run. It does not mean the payload is a valid
 
 `guard.post` hashes the HTTP method, the canonical URL, and the canonical JSON body with SHA-256 and sends that value as `request_digest`. Headers are not part of the digest: they are transport data, and an x402 payment header must not become part of the authorized target request or be forwarded to it. The digest is not the Oracle audit-chain `input_hash`.
 
-The target is called only when the Oracle returns `COMMIT` and the same `request_digest`. If the digest is missing or different, `guard.post` does not open a connection to the target and the reason is `request digest missing` or `request digest mismatch`. `result.executed` is true only after that request is sent.
+The target is called only when the Oracle returns `COMMIT` and the same `request_digest`. If the digest is missing or different, `guard.post` does not open a connection to the target and the reason is `request digest missing` or `request digest mismatch`. `result.executed` is true only after that request returns a non-redirect response. `result.request_sent` is true when the POST to the digested URL was sent.
 
 The hosted Oracle echoes `request_digest` on `EvaluateResponse`. The production proof observed a live `COMMIT` whose returned digest matched the guard's digest, and only then called the target. Clients that omit the field still receive `request_digest: null`; this guard always sends it. An empty string is treated as absent.
 
@@ -73,7 +73,7 @@ The Oracle call has one timeout and is not retried. The guard denies the side ef
 - the Oracle returns HTTP 402, including when the body says `COMMIT`
 - the Oracle returns any other non-200 status, including HTTP 500
 - the Oracle redirects. The default client does not follow them. A custom `transport` is responsible for its own requests; the guard still will not call the target unless that transport returns exact `COMMIT` and the same digest
-- the target responds with a redirect. The client does not open `Location`. `executed` is false. The digested URL may already have received that first POST
+- the target responds with a redirect. The client does not open `Location`. Known case: `request_sent` is true and `executed` is false. The digested URL may already have received that first POST. `executed: false` does not mean the request never left this process
 - the body is not a well-formed verdict: not JSON, `{}`, an unknown verdict, a missing or non-string `reason`, or any shape other than `COMMIT` or `NO_COMMIT` plus a string `reason` on HTTP 200
 
 HTTP 200 by itself is not permission. Confidence, the wording of `reason`, and any `allowed` flag in the body are not permission.
@@ -122,12 +122,14 @@ const guard = new DCLGuard({
 
 If that transport is missing, raises, or still returns HTTP 402, `check` returns `allowed: false` and `post` does not call the target. You do not parse a 402 response yourself.
 
-`examples/production_web2_proof.py` is outside the guard. It pays only the Oracle evaluate URL and refuses any other URL. The payer key is the first non-empty value of `DCL_PAYER_PRIVATE_KEY`, `X402_PRIVATE_KEY`, or `PRIVATE_KEY`. `DCL_MAX_PAYMENT_USDC` defaults to `0.01`. The guard does not read those variables and does not sign the payment. The target POST remains the guard's unpaid client and runs only after exact `COMMIT`, a matching `request_digest`, and a non-redirect response.
+`examples/production_web2_proof.py` is outside the guard. It pays only the Oracle evaluate URL and refuses any other URL. The payer key is `DCL_PAYER_PRIVATE_KEY`. `X402_PRIVATE_KEY` is the only alias. A general `PRIVATE_KEY` is ignored. If neither accepted variable is set, the adapter raises before any network call or signature and names the missing variable. `DCL_MAX_PAYMENT_USDC` defaults to `0.01`. The guard does not read those variables and does not sign the payment. The target POST remains the guard's unpaid client and runs only after exact `COMMIT`, a matching `request_digest`, and a non-redirect response.
 
 The recorded runs were taken at commit `79390fc93f9ecf0baebe96e750d25e133ff1ef3e`:
 
 - `examples/production_web2_proof.json` at `2026-10-02T06:45:16Z`. Digest `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019`. Oracle chain id `0xaa13b48b6089eb31c9050719b61705d2a33dce911e0299b32c5244cb8821db83`. Payment transaction `0x33f8af305b255b1a5d15b891f036b5940a47afa90fe9742201ea35af28ce2ad1`.
 - `examples/production_web2_negative_proof.json` at `2026-10-02T06:46:17Z`. Digest `bc6bc2e1d5e9101a177d0d07469670d81699305e41e23b6fe6ff46d70b8b806e`. Oracle chain id `0xa244dccca0682a89441f99bc982ec1f260a2493f667e80c72bd1c4a22d846689`. `target.called` is false because this client did not call the target. httpbin does not contribute an independent counter.
+
+These two JSON files are the current evidence. This repository does not contain an earlier proof note. A write-up that cites commit `8b620d0` or different hashes is a previous run, not a second canonical proof. The identifier that note called an Oracle transaction reference is the audit-chain hash (`oracle.tx_hash`), not a Base transaction.
 
 Do not commit a private key or a seed phrase. Use a dedicated wallet with a small balance, not a treasury or personal wallet.
 
@@ -196,7 +198,7 @@ if result.executed:
     print(result.status_code, result.text)
 ```
 
-On `NO_COMMIT`, a missing or different `request_digest`, timeout, HTTP 402, HTTP 500, a network error, or a malformed reply, `result.executed` is false and the target receives no request.
+On `NO_COMMIT`, a missing or different `request_digest`, timeout, HTTP 402, HTTP 500, a network error, or a malformed reply, `result.executed` and `result.request_sent` are both false and the target receives no request. A refused target redirect is the known exception: `request_sent` is true and `executed` is false.
 
 ## TypeScript
 

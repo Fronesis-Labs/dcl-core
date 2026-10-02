@@ -389,6 +389,7 @@ describe("DCLGuard side effects", () => {
       assert.equal(oracle.hits.length, 1, sample.mode);
       assert.equal(effect.hits.length, sample.targetHits, sample.mode);
       assert.equal(result.executed, sample.executed, sample.mode);
+      assert.equal(result.requestSent, sample.executed, sample.mode);
       assert.equal(result.decision.allowed, sample.executed, sample.mode);
       assert.equal(result.decision.allowed, result.decision.verdict === "COMMIT");
       if (sample.executed) {
@@ -702,6 +703,7 @@ describe("DCLGuard side effects", () => {
     assert.deepEqual(originHits, [JSON.stringify({ n: 1 })]);
     assert.deepEqual(sinkHits, []);
     assert.equal(result.executed, false);
+    assert.equal(result.requestSent, true);
     assert.equal(result.decision.verdict, "NO_COMMIT");
     assert.equal(result.decision.reason, "target redirect refused");
   });
