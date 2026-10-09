@@ -2,8 +2,9 @@
 
 DCLGuard stays unpaid and fail-closed. This adapter is the only place that
 talks to the x402 client. It pays a single Oracle evaluate request when that
-request returns HTTP 402, and it refuses every other URL before any network
-call and before any signature.
+request returns HTTP 402, using the v1 body or the v2 ``PAYMENT-REQUIRED``
+header, and it refuses every other URL before any network call and before
+any signature.
 """
 
 from __future__ import annotations
@@ -194,21 +195,13 @@ class OracleOnlyX402Transport:
         """Create one x402 payment header for the 402 the Oracle just returned."""
         from x402 import NoMatchingRequirementsError, x402ClientSync
         from x402.http.x402_http_client import x402HTTPClientSync
-        from x402.mechanisms.evm.exact.v1 import ExactEvmSchemeV1
         from eth_account import Account
 
         client = x402ClientSync()
         http = x402HTTPClientSync(client)
         required = http.get_payment_required_response(_header_lookup(response_headers), raw)
         account = Account.from_key(self._payer_key)
-        scheme = ExactEvmSchemeV1(account)
-        registered = False
-        for requirement in required.accepts:
-            if getattr(requirement, "scheme", None) != "exact":
-                continue
-            client.register_v1(requirement.network, scheme)
-            registered = True
-        if not registered:
+        if not _register_exact_scheme(client, account, required):
             raise NoMatchingRequirementsError("no exact payment requirement")
 
         # The x402 client's own spend control. "$0.01" rejects maxAmountRequired above 10000.
@@ -253,6 +246,39 @@ class OracleOnlyX402Transport:
 
 class _CapExceeded(Exception):
     """The 402 price is above the configured USDC cap. Nothing was signed."""
+
+
+def _register_exact_scheme(client: Any, account: Any, required: Any) -> bool:
+    """Register the exact EVM scheme for the 402 version that was actually returned.
+
+    x402 v2 looks up ``client.register`` and reads ``PAYMENT-REQUIRED``.
+    x402 v1 looks up ``client.register_v1`` and reads the JSON body.
+    A non-exact accept is left unregistered, so it cannot be selected.
+    """
+    version = getattr(required, "x402_version", None)
+    if version == 2:
+        from x402.mechanisms.evm.exact.client import ExactEvmScheme
+
+        scheme = ExactEvmScheme(account)
+        register = client.register
+    elif version == 1:
+        from x402.mechanisms.evm.exact.v1 import ExactEvmSchemeV1
+
+        scheme = ExactEvmSchemeV1(account)
+        register = client.register_v1
+    else:
+        return False
+
+    registered = False
+    for requirement in getattr(required, "accepts", ()):
+        if getattr(requirement, "scheme", None) != "exact":
+            continue
+        network = getattr(requirement, "network", None)
+        if not isinstance(network, str) or not network:
+            continue
+        register(network, scheme)
+        registered = True
+    return registered
 
 
 def _payer_key(environ: Mapping[str, str]) -> str | None:
