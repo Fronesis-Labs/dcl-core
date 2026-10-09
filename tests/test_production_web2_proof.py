@@ -214,6 +214,46 @@ class ExampleCredentialTests(unittest.TestCase):
         self.assertNotIn("http_status", record["target"])
 
 
+_BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+_BASE_PAY_TO = "0xb790ed3796194E5511C44411CF045F67E069cdC0"
+
+
+def _v2_challenge(
+    accepts: list[dict[str, object]],
+) -> tuple[bytes, dict[str, str]]:
+    """Build an unpaid v2 402. The body is empty; the challenge is the header."""
+    from x402.http.utils import encode_payment_required_header
+    from x402.schemas import PaymentRequired, PaymentRequirements, ResourceInfo
+
+    required = PaymentRequired(
+        x402_version=2,
+        resource=ResourceInfo(
+            url="https://bazaar.example/evaluate/fast",
+            description="fast",
+            mime_type="application/json",
+        ),
+        accepts=[PaymentRequirements.model_validate(item) for item in accepts],
+    )
+    return b"", {
+        "Content-Type": "application/json",
+        "PAYMENT-REQUIRED": encode_payment_required_header(required),
+    }
+
+
+def _exact_base_accept(amount: str, **overrides: object) -> dict[str, object]:
+    accept: dict[str, object] = {
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "amount": amount,
+        "payTo": _BASE_PAY_TO,
+        "maxTimeoutSeconds": 300,
+        "asset": _BASE_USDC,
+        "extra": {"name": "USD Coin", "version": "2"},
+    }
+    accept.update(overrides)
+    return accept
+
+
 def _challenge(amount: str) -> bytes:
     return json.dumps(
         {
@@ -254,12 +294,20 @@ class _HitServer:
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b""
-                paid = self.headers.get("X-PAYMENT")
+                signature = self.headers.get("PAYMENT-SIGNATURE")
+                legacy = self.headers.get("X-PAYMENT")
+                if signature:
+                    payment_header = "PAYMENT-SIGNATURE"
+                elif legacy:
+                    payment_header = "X-PAYMENT"
+                else:
+                    payment_header = None
                 parent.hits.append(
                     {
                         "path": self.path,
                         "body": raw,
-                        "paid": bool(paid),
+                        "paid": payment_header is not None,
+                        "payment_header": payment_header,
                     }
                 )
                 status, payload, extra = respond(self.path, raw, self.headers)
@@ -526,6 +574,206 @@ class OracleTransportTests(unittest.TestCase):
         )
         self.assertTrue(record["enforcement"]["target_called_after_commit"])
         self.assertIs(transport.observation, observation)
+
+    def test_v2_payment_required_calls_the_target_only_after_commit(self) -> None:
+        from x402.http.utils import decode_payment_signature_header, encode_payment_response_header
+        from x402.schemas.responses import SettleResponse
+
+        payment_tx = "0x" + "ef" * 32
+        audit_tx = "0x" + "11" * 32
+        settle = encode_payment_response_header(
+            SettleResponse(success=True, transaction=payment_tx, network="eip155:8453", amount="10000")
+        )
+        other = {
+            "scheme": "upto",
+            "network": "eip155:84532",
+            "amount": "1",
+            "payTo": "0x1111111111111111111111111111111111111111",
+            "maxTimeoutSeconds": 300,
+            "asset": "0x2222222222222222222222222222222222222222",
+            "extra": {"name": "Other", "version": "2"},
+        }
+        body, challenge_headers = _v2_challenge([other, _exact_base_accept("10000")])
+        signatures: list[str] = []
+
+        def respond(path, raw, headers):  # type: ignore[no-untyped-def]
+            signature = headers.get("PAYMENT-SIGNATURE")
+            if signature:
+                signatures.append(signature)
+                echoed = None
+                try:
+                    incoming = json.loads(raw.decode("utf-8"))
+                    if isinstance(incoming, dict) and isinstance(incoming.get("request_digest"), str):
+                        echoed = incoming["request_digest"]
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    echoed = None
+                reply = {
+                    "verdict": "COMMIT",
+                    "reason": "ok",
+                    "trace_id": "trace-v2",
+                    "tx_hash": audit_tx,
+                    "event_id": "event-v2",
+                }
+                if echoed:
+                    reply["request_digest"] = echoed
+                return 200, json.dumps(reply).encode("utf-8"), {
+                    "Content-Type": "application/json",
+                    "PAYMENT-RESPONSE": settle,
+                }
+            return 402, body, challenge_headers
+
+        oracle = _HitServer(respond)
+        target = _HitServer(lambda path, raw, headers: (200, b'{"echo":true}', {"Content-Type": "application/json"}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json", "note": "v2"})
+        finally:
+            oracle.close()
+            target.close()
+
+        self.assertEqual([hit["payment_header"] for hit in oracle.hits], [None, "PAYMENT-SIGNATURE"])
+        self.assertEqual(len(signatures), 1)
+        payload = decode_payment_signature_header(signatures[0])
+        accepted = payload.accepted
+        self.assertEqual(payload.x402_version, 2)
+        self.assertEqual(accepted.scheme, "exact")
+        self.assertEqual(accepted.network, "eip155:8453")
+        self.assertEqual(accepted.get_amount(), "10000")
+        self.assertEqual(accepted.asset.lower(), _BASE_USDC.lower())
+        self.assertEqual(accepted.pay_to.lower(), _BASE_PAY_TO.lower())
+        self.assertEqual(len(target.hits), 1)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.decision.verdict, "COMMIT")
+        self.assertEqual(result.decision.trace_id, "trace-v2")
+        self.assertEqual(result.decision.tx_hash, audit_tx)
+        self.assertEqual(result.decision.event_id, "event-v2")
+        self.assertNotEqual(result.decision.trace_id, result.decision.tx_hash)
+        self.assertNotEqual(result.decision.trace_id, payment_tx)
+        self.assertEqual(observation.sequence, ["oracle_402", "payment", "oracle_final"])
+        self.assertEqual(observation.payment_network, "eip155:8453")
+        self.assertEqual(observation.payment_amount_atomic, "10000")
+        self.assertEqual(observation.payment_tx_hash, payment_tx)
+        self.assertTrue(observation.settled)
+
+    def test_v2_no_commit_does_not_call_the_target(self) -> None:
+        body, challenge_headers = _v2_challenge([_exact_base_accept("10000")])
+
+        def respond(path, raw, headers):  # type: ignore[no-untyped-def]
+            if headers.get("PAYMENT-SIGNATURE"):
+                echoed = json.loads(raw.decode("utf-8")).get("request_digest")
+                return 200, json.dumps({
+                    "verdict": "NO_COMMIT",
+                    "reason": "policy",
+                    "request_digest": echoed,
+                    "trace_id": "trace-deny",
+                    "tx_hash": "0x" + "22" * 32,
+                }).encode("utf-8"), {"Content-Type": "application/json"}
+            return 402, body, challenge_headers
+
+        oracle = _HitServer(respond)
+        target = _HitServer(lambda path, raw, headers: (200, b"{}", {}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json"})
+        finally:
+            oracle.close()
+            target.close()
+        self.assertEqual([hit["payment_header"] for hit in oracle.hits], [None, "PAYMENT-SIGNATURE"])
+        self.assertEqual(target.hits, [])
+        self.assertFalse(result.executed)
+        self.assertEqual(result.decision.verdict, "NO_COMMIT")
+        self.assertEqual(result.decision.trace_id, "trace-deny")
+        self.assertNotEqual(result.decision.trace_id, result.decision.tx_hash)
+
+    def test_v2_digest_mismatch_does_not_call_the_target(self) -> None:
+        body, challenge_headers = _v2_challenge([_exact_base_accept("10000")])
+
+        def respond(path, raw, headers):  # type: ignore[no-untyped-def]
+            if headers.get("PAYMENT-SIGNATURE"):
+                return 200, json.dumps({
+                    "verdict": "COMMIT",
+                    "reason": "ok",
+                    "request_digest": "ab" * 32,
+                    "tx_hash": "0x" + "33" * 32,
+                }).encode("utf-8"), {"Content-Type": "application/json"}
+            return 402, body, challenge_headers
+
+        oracle = _HitServer(respond)
+        target = _HitServer(lambda path, raw, headers: (200, b"{}", {}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json"})
+        finally:
+            oracle.close()
+            target.close()
+        self.assertEqual(len(target.hits), 0)
+        self.assertFalse(result.executed)
+        self.assertEqual(result.decision.verdict, "NO_COMMIT")
+        self.assertEqual(result.decision.reason, "request digest mismatch")
+        self.assertIsNone(result.decision.trace_id)
+        self.assertEqual(result.decision.tx_hash, "0x" + "33" * 32)
+
+    def test_v2_oracle_http_error_does_not_call_the_target(self) -> None:
+        body, challenge_headers = _v2_challenge([_exact_base_accept("10000")])
+
+        def respond(path, raw, headers):  # type: ignore[no-untyped-def]
+            if headers.get("PAYMENT-SIGNATURE"):
+                return 500, b"oracle down", {"Content-Type": "text/plain"}
+            return 402, body, challenge_headers
+
+        oracle = _HitServer(respond)
+        target = _HitServer(lambda path, raw, headers: (200, b"{}", {}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json"})
+        finally:
+            oracle.close()
+            target.close()
+        self.assertEqual(target.hits, [])
+        self.assertFalse(result.executed)
+        self.assertEqual(result.decision.verdict, "NO_COMMIT")
+        self.assertEqual(observation.final_status, 500)
+        self.assertEqual(observation.stage, "oracle error")
+
+    def test_v2_amount_above_the_cap_does_not_sign(self) -> None:
+        body, challenge_headers = _v2_challenge([_exact_base_accept("20000")])
+        oracle = _HitServer(lambda path, raw, headers: (402, body, challenge_headers))
+        target = _HitServer(lambda path, raw, headers: (200, b"{}", {}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json"})
+        finally:
+            oracle.close()
+            target.close()
+        self.assertEqual(len(oracle.hits), 1)
+        self.assertIsNone(oracle.hits[0]["payment_header"])
+        self.assertEqual(target.hits, [])
+        self.assertFalse(result.executed)
+        self.assertTrue(observation.over_cap)
+        self.assertFalse(observation.payment_attempted)
+
+    def test_v2_non_exact_scheme_is_not_registered(self) -> None:
+        body, challenge_headers = _v2_challenge([_exact_base_accept("10000", scheme="upto")])
+        oracle = _HitServer(lambda path, raw, headers: (402, body, challenge_headers))
+        target = _HitServer(lambda path, raw, headers: (200, b"{}", {}))
+        observation = self.adapter.OracleTransportObservation()
+        try:
+            guard, _transport = self._guard(oracle, observation)
+            result = guard.post(target.url + "/post", json={"action": "post_json"})
+        finally:
+            oracle.close()
+            target.close()
+        self.assertEqual(len(oracle.hits), 1)
+        self.assertIsNone(oracle.hits[0]["payment_header"])
+        self.assertEqual(target.hits, [])
+        self.assertFalse(result.executed)
+        self.assertFalse(observation.payment_attempted)
+        self.assertEqual(observation.stage, "payment failed")
 
     def test_negative_record_requires_a_live_policy_denial(self) -> None:
         import importlib

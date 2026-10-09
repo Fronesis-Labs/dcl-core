@@ -8,6 +8,8 @@ The recorded evidence was produced from commit `79390fc93f9ecf0baebe96e750d25e13
 
 These two JSON files are the current evidence. This repository does not contain an earlier proof note. A write-up that cites commit `8b620d0` or different hashes is a previous run, not a second canonical proof. The identifier that note called an Oracle transaction reference is the audit-chain hash (`oracle.tx_hash`), not a Base transaction.
 
+The first full Bazaar live run is [bazaar_live_e2e_proof.json](bazaar_live_e2e_proof.json) (`2026-10-09T09:57:54Z`). `DCLGuard.post` paid one `$0.01` `exact` transfer on `eip155:8453` to `https://bazaar.fronesislabs.com/evaluate/fast`, received HTTP 200 and `COMMIT` with digest `841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019`, then `POST https://httpbin.org/post` returned HTTP 200 and echoed that JSON body. The payment transaction is `0xc7077fcb8c2f254e2f27aa4a81331cdf99cff8b47036198d82b1e33dbb0810f8`. The audit-chain id `0xb3ed861a91cfdaf839aee4719e34b0d95a2a518f5c5d93f66ee27e32475796fa` is not that payment. The observed sequence contains one `payment` and one `target`. httpbin echoed `{"action":"post_json","note":"harmless DCL Web2 production proof"}`.
+
 The Oracle receives the action, the target, and the JSON body in the `response` field, not only the digest, because checks such as jailbreak evaluate that text. On the production Oracle that text is sent to `https://webhook.fronesislabs.com`, which is the same disclosure as publishing the decision on the public audit board.
 
 `target.called: false` on the negative proof means this process did not execute the target POST. httpbin does not supply a separate counter. Another client could still have called httpbin.

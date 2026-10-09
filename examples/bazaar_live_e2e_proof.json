@@ -1,0 +1,38 @@
+{
+  "proof": "dcl-web2-production",
+  "complete": true,
+  "oracle": {
+    "url": "https://bazaar.fronesislabs.com",
+    "verdict": "COMMIT",
+    "reason": "All policy checks passed",
+    "initial_status": 402,
+    "payment_required": true,
+    "final_status": 200,
+    "tx_hash": "0xb3ed861a91cfdaf839aee4719e34b0d95a2a518f5c5d93f66ee27e32475796fa",
+    "request_digest": "841bae2cf5392e1c55c4be5bae4187722df1af40166b1f8fc5c485d515b70019"
+  },
+  "target": {
+    "url": "https://httpbin.org/post",
+    "method": "POST",
+    "http_status": 200
+  },
+  "enforcement": {
+    "dcl_checked_before_target": true,
+    "target_called_after_commit": true,
+    "sequence": [
+      "oracle_402",
+      "payment",
+      "oracle_final",
+      "target"
+    ]
+  },
+  "timestamp": "2026-10-09T09:57:54Z",
+  "payment": {
+    "attempted": true,
+    "network": "eip155:8453",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "amount_atomic": "10000",
+    "settled": true,
+    "tx_hash": "0xc7077fcb8c2f254e2f27aa4a81331cdf99cff8b47036198d82b1e33dbb0810f8"
+  }
+}
